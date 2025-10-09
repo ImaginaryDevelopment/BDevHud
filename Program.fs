@@ -49,21 +49,59 @@ let displayGitFolders (gitFolders: string[]) =
             let parentDir = Directory.GetParent(folder).FullName
             printfn $"{i + 1}. {parentDir}")
 
-// Example usage
+// Get root directory from command line args or environment variable
+let getRootDirectory () =
+    let args = Environment.GetCommandLineArgs()
+
+    // Check for command line argument (skip the first arg which is the program name)
+    if args.Length > 1 then
+        let rootPath = args.[1]
+        printfn $"Using command line root directory: {rootPath}"
+        Some rootPath
+    else
+        // Check for DEVROOT environment variable
+        let devRoot = Environment.GetEnvironmentVariable("DEVROOT")
+
+        if not (String.IsNullOrEmpty(devRoot)) then
+            printfn $"Using DEVROOT environment variable: {devRoot}"
+            Some devRoot
+        else
+            printfn "No root directory specified. Searching all local drives."
+            None
+
+// Test function to demonstrate Git.Adapter functionality
+let testGitRemote (gitFolder: string) =
+    printfn $"\n--- Testing Git Remote for: {gitFolder} ---"
+    let result = GitAdapter.getRemote gitFolder
+
+    if result.Success then
+        printfn $"Remote info: {result.Output}"
+    else
+        printfn $"Error: {result.Error}"
+
+// Main program entry point
 let main () =
     printfn "Git Folder Spider Search"
     printfn "======================="
 
-    // Example 1: Search specific directory
-    let specificDir = @"C:\dev" // Change this to your desired directory
-    let gitFoldersInDev = findGitFolders (Some specificDir)
-    displayGitFolders gitFoldersInDev
+    let rootDirectory = getRootDirectory ()
+    let gitFolders = findGitFolders rootDirectory
+    displayGitFolders gitFolders
 
-    printfn "\n" + String.replicate 50 "-" + "\n"
+    // Test git remote functionality on first few repositories
+    if gitFolders.Length > 0 then
+        printfn "\n%s" (String.replicate 50 "=")
+        printfn "Testing Git Remote Information"
+        printfn "%s" (String.replicate 50 "=")
 
-    // Example 2: Search all local drives
-    let allGitFolders = findGitFolders None
-    displayGitFolders allGitFolders
+        // Test first 3 git repositories
+        let testCount = min 3 gitFolders.Length
+
+        for i in 0 .. (testCount - 1) do
+            let parentDir = Directory.GetParent(gitFolders.[i]).FullName
+            testGitRemote parentDir
+
+    printfn "\nSearch completed."
 
 // Run the main function
 main ()
