@@ -52,12 +52,9 @@ let displayGitFolders (gitFolders: string[]) =
             // Get and display remote information
             let remoteResult = GitAdapter.getRemote parentDir
 
-            if remoteResult.Success && not (String.IsNullOrWhiteSpace(remoteResult.Output)) then
-                let remoteLines =
-                    remoteResult.Output.Split('\n')
-                    |> Array.filter (fun line -> not (String.IsNullOrWhiteSpace(line)))
-
-                remoteLines |> Array.iter (fun line -> printfn $"    {line}")
+            if remoteResult.Success && remoteResult.Remotes.Length > 0 then
+                remoteResult.Remotes
+                |> List.iter (fun remote -> printfn $"    {remote.Name}      {remote.Url} ({remote.Type})")
             else
                 printfn "    (no remote configured)")
 
