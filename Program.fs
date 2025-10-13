@@ -37,7 +37,7 @@ let findGitFolders (rootDirectory: string option) =
         DirectoryTraversal.traverseAllLocalDrives processDirectoryForGit [] combineResults
         |> List.toArray
 
-/// Display results of git folder search with remote information
+/// Display results of git folder search with remote information and git pull
 let displayGitFolders (gitFolders: string[]) =
     if gitFolders.Length = 0 then
         printfn "No .git folders found."
@@ -55,6 +55,12 @@ let displayGitFolders (gitFolders: string[]) =
             if remoteResult.Success && remoteResult.Remotes.Length > 0 then
                 remoteResult.Remotes
                 |> List.iter (fun remote -> printfn $"    {remote.Name}      {remote.Url} ({remote.Type})")
+
+                // Run git pull for this repository
+                let (pullSuccess, pullError) = GitAdapter.gitPull parentDir
+
+                if not pullSuccess then
+                    printfn $"    ⚠️  Git pull failed: {pullError}"
             else
                 printfn "    (no remote configured)")
 

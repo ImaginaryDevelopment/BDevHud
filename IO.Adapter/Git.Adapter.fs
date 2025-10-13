@@ -149,3 +149,61 @@ module GitAdapter =
             && Directory.Exists(Path.Combine(folderPath, ".git"))
         with _ ->
             false
+
+    /// Runs git pull in the specified directory
+    /// Returns success status and any error message
+    let gitPull (folderPath: string) : (bool * string) =
+        try
+            if not (isGitRepository folderPath) then
+                (false, "Not a git repository")
+            else
+                let startInfo = ProcessStartInfo()
+                startInfo.FileName <- "git"
+                startInfo.Arguments <- "pull"
+                startInfo.WorkingDirectory <- folderPath
+                startInfo.UseShellExecute <- false
+                startInfo.RedirectStandardOutput <- true
+                startInfo.RedirectStandardError <- true
+                startInfo.CreateNoWindow <- true
+
+                use gitProcess = new Process()
+                gitProcess.StartInfo <- startInfo
+
+                let output = System.Text.StringBuilder()
+                let error = System.Text.StringBuilder()
+
+                gitProcess.OutputDataReceived.Add(fun e ->
+                    if not (String.IsNullOrEmpty(e.Data)) then
+                        output.AppendLine(e.Data) |> ignore)
+
+                gitProcess.ErrorDataReceived.Add(fun e ->
+                    if not (String.IsNullOrEmpty(e.Data)) then
+                        error.AppendLine(e.Data) |> ignore)
+
+                let started = gitProcess.Start()
+
+                if started then
+                    gitProcess.BeginOutputReadLine()
+                    gitProcess.BeginErrorReadLine()
+
+                    let completed = gitProcess.WaitForExit(10000) // 10 second timeout
+
+                    if completed then
+                        let outputStr = output.ToString().Trim()
+                        let errorStr = error.ToString().Trim()
+
+                        if gitProcess.ExitCode = 0 then
+                            (true, "")
+                        else
+                            (false,
+                             if String.IsNullOrEmpty(errorStr) then
+                                 outputStr
+                             else
+                                 errorStr)
+                    else
+                        gitProcess.Kill()
+                        (false, "Git pull timed out")
+                else
+                    (false, "Failed to start git pull process")
+        with ex ->
+            (false, $"Exception: {ex.Message}")
