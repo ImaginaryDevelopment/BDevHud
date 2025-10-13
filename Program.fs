@@ -37,7 +37,7 @@ let findGitFolders (rootDirectory: string option) =
         DirectoryTraversal.traverseAllLocalDrives processDirectoryForGit [] combineResults
         |> List.toArray
 
-/// Display results of git folder search
+/// Display results of git folder search with remote information
 let displayGitFolders (gitFolders: string[]) =
     if gitFolders.Length = 0 then
         printfn "No .git folders found."
@@ -47,7 +47,19 @@ let displayGitFolders (gitFolders: string[]) =
         gitFolders
         |> Array.iteri (fun i folder ->
             let parentDir = Directory.GetParent(folder).FullName
-            printfn $"{i + 1}. {parentDir}")
+            printfn $"{i + 1}. {parentDir}"
+
+            // Get and display remote information
+            let remoteResult = GitAdapter.getRemote parentDir
+
+            if remoteResult.Success && not (String.IsNullOrWhiteSpace(remoteResult.Output)) then
+                let remoteLines =
+                    remoteResult.Output.Split('\n')
+                    |> Array.filter (fun line -> not (String.IsNullOrWhiteSpace(line)))
+
+                remoteLines |> Array.iter (fun line -> printfn $"    {line}")
+            else
+                printfn "    (no remote configured)")
 
 // Get root directory from command line args or environment variable
 let getRootDirectory () =
@@ -69,16 +81,6 @@ let getRootDirectory () =
             printfn "No root directory specified. Searching all local drives."
             None
 
-// Test function to demonstrate Git.Adapter functionality
-let testGitRemote (gitFolder: string) =
-    printfn $"\n--- Testing Git Remote for: {gitFolder} ---"
-    let result = GitAdapter.getRemote gitFolder
-
-    if result.Success then
-        printfn $"Remote info: {result.Output}"
-    else
-        printfn $"Error: {result.Error}"
-
 // Main program entry point
 let main () =
     printfn "Git Folder Spider Search"
@@ -87,19 +89,6 @@ let main () =
     let rootDirectory = getRootDirectory ()
     let gitFolders = findGitFolders rootDirectory
     displayGitFolders gitFolders
-
-    // Test git remote functionality on first few repositories
-    if gitFolders.Length > 0 then
-        printfn "\n%s" (String.replicate 50 "=")
-        printfn "Testing Git Remote Information"
-        printfn "%s" (String.replicate 50 "=")
-
-        // Test first 3 git repositories
-        let testCount = min 3 gitFolders.Length
-
-        for i in 0 .. (testCount - 1) do
-            let parentDir = Directory.GetParent(gitFolders.[i]).FullName
-            testGitRemote parentDir
 
     printfn "\nSearch completed."
 
