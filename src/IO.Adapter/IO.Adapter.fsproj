@@ -6,7 +6,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="Library.fs" />
     <Compile Include="DirectoryTraversal.fs" />
     <Compile Include="Git.Adapter.fs" />
   </ItemGroup>

@@ -7,7 +7,7 @@ Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "BDevHud", "BDevHud.fsproj",
 EndProject
 Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Octo.Adapter", "src\Octo.Adapter\Octo.Adapter.fsproj", "{C3D4E5F6-G7H8-9012-CDEF-345678901234}"
 EndProject
-Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "IOI.Adapter", "src\IOI.Adapter\IOI.Adapter.fsproj", "{D4E5F6G7-H8I9-0123-DEFG-456789012345}"
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "IO.Adapter", "src\IO.Adapter\IO.Adapter.fsproj", "{D4E5F6G7-H8I9-0123-DEFG-456789012345}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
