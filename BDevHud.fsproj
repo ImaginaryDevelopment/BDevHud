@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <ProjectReference Include="IO.Adapter\IO.Adapter.fsproj" />
+    <ProjectReference Include="src\Octo.Adapter\Octo.Adapter.fsproj" />
   </ItemGroup>
 
 </Project>
