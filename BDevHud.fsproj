@@ -10,7 +10,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="src\Io.Adapter\Io.Adapter.fsproj" />
+    <ProjectReference Include="src\IOI.Adapter\IOI.Adapter.fsproj" />
     <ProjectReference Include="src\Octo.Adapter\Octo.Adapter.fsproj" />
   </ItemGroup>
 
