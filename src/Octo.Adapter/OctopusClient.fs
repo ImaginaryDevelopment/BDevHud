@@ -43,6 +43,21 @@ module OctopusClient =
           IsDisabled = project.IsDisabled
           SpaceName = spaceName }
 
+    /// Test connection to Octopus server by attempting to find the default space
+    let testConnection (config: OctopusConfig) : Task<Result<string, string>> =
+        task {
+            try
+                let repository = createRepository config
+                // Try to find the default space - this should force a real network call
+                let defaultSpace = repository.Spaces.FindByName "Default"
+                if isNull defaultSpace then
+                    return Ok "Connected successfully (Default space not found - might be older Octopus version)"
+                else
+                    return Ok $"Connected successfully (Found default space: {defaultSpace.Name})"
+            with
+            | ex -> return Error ex.Message
+        }
+
     /// Get all spaces available in the Octopus instance
     let getSpaces (config: OctopusConfig) : Task<SpaceResource list> =
         task {
@@ -139,4 +154,63 @@ module OctopusClient =
                     { OctopusUrl = config.ServerUrl
                       ProjectName = project.Name
                       GitRepoUrl = gitRepoUrl })
+        }
+
+    /// Type for representing Octopus variables
+    type OctopusVariable =
+        { Name: string
+          Value: string option  // None for sensitive variables that can't be retrieved
+          IsSensitive: bool
+          Scope: string
+          ProjectName: string option
+          LibrarySetName: string option }
+
+    /// Get variables from a specific project
+    let getProjectVariables (config: OctopusConfig) (projectId: string) : Task<OctopusVariable list> =
+        task {
+            let repository = createRepository config
+            let project = repository.Projects.Get(projectId)
+            let variableSet = repository.VariableSets.Get(project.VariableSetId)
+            
+            return
+                variableSet.Variables
+                |> Seq.map (fun variable -> 
+                    { Name = variable.Name
+                      Value = if variable.IsSensitive then None else Some variable.Value
+                      IsSensitive = variable.IsSensitive  
+                      Scope = 
+                        let scopes = 
+                            [ if variable.Scope.ContainsKey(ScopeField.Environment) then 
+                                yield "Env: " + String.Join(", ", variable.Scope.[ScopeField.Environment])
+                              if variable.Scope.ContainsKey(ScopeField.Machine) then 
+                                yield "Machine: " + String.Join(", ", variable.Scope.[ScopeField.Machine])
+                              if variable.Scope.ContainsKey(ScopeField.Role) then 
+                                yield "Role: " + String.Join(", ", variable.Scope.[ScopeField.Role]) ]
+                        if scopes.IsEmpty then "All" else String.Join("; ", scopes)
+                      ProjectName = Some project.Name
+                      LibrarySetName = None })
+                |> List.ofSeq
+        }
+
+    /// Get variables from all projects
+    let getAllProjectVariables (config: OctopusConfig) : Task<OctopusVariable list> =
+        task {
+            let! projects = getAllProjects config
+            let! allVariables = 
+                projects 
+                |> List.map (fun project -> getProjectVariables config project.Id)
+                |> Task.WhenAll
+            
+            return allVariables |> Array.toList |> List.concat
+        }
+
+    /// Search for variables by name pattern (case-insensitive)
+    let searchVariables (config: OctopusConfig) (namePattern: string) : Task<OctopusVariable list> =
+        task {
+            let! allVariables = getAllProjectVariables config
+            let pattern = namePattern.ToLower()
+            
+            return 
+                allVariables
+                |> List.filter (fun var -> var.Name.ToLower().Contains(pattern))
         }

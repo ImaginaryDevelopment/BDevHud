@@ -184,6 +184,20 @@ let getOctopusUrl () =
         else
             None
 
+// Get Octopus variable search pattern from command line
+let getVariableSearchPattern () =
+    let args = Environment.GetCommandLineArgs()
+    // Check for command line argument (look for --search-variable)
+    let searchVarArgIndex =
+        args |> Array.tryFindIndex (fun arg -> arg = "--search-variable" || arg = "--search-var")
+
+    match searchVarArgIndex with
+    | Some index when index + 1 < args.Length ->
+        let pattern = args.[index + 1]
+        printfn $"Searching for variables matching: {pattern}"
+        Some pattern
+    | _ -> None
+
 // Get Octopus API key from command line args or environment variable
 let getOctopusApiKey () =
     let args = Environment.GetCommandLineArgs()
@@ -312,20 +326,32 @@ let main () =
             printfn $"    API Key: [REDACTED - length {apiKey.Length}]"
             printfn $"    Target Space: {targetSpace}"
             
-            // First, try to get spaces to test connectivity
-            printfn $"🔍 Testing connection by listing available spaces..."
-            printfn $"    Making API call to: {baseUrl}/api/spaces"
-            let spaces = OctopusClient.getSpaces config |> Async.AwaitTask |> Async.RunSynchronously
-            printfn $"✅ Connection successful! Found {spaces.Length} space(s):"
-            spaces |> List.iteri (fun i space -> 
-                printfn $"    {i + 1}. {space.Name} (ID: {space.Id})")
+            // First, test connectivity with a proper connection test
+            printfn $"🔍 Testing connection to Octopus server..."
+            let connectionResult = OctopusClient.testConnection config |> Async.AwaitTask |> Async.RunSynchronously
+            
+            match connectionResult with
+            | Ok serverInfo ->
+                printfn $"✅ Connection successful! {serverInfo}"
                 
-            // If no spaces found but connection worked, might need to use default space
-            if spaces.Length = 0 then
-                printfn $"⚠️  No spaces returned - this might indicate:"
-                printfn $"    - Using an older Octopus version without spaces"
-                printfn $"    - API key lacks permission to list spaces"
-                printfn $"    - Need to query default space directly"
+                // Now get spaces
+                printfn $"🔍 Listing available spaces..."
+                printfn $"    Making API call to: {baseUrl}/api/spaces"
+                let spaces = OctopusClient.getSpaces config |> Async.AwaitTask |> Async.RunSynchronously
+                printfn $"📋 Found {spaces.Length} space(s):"
+                spaces |> List.iteri (fun i space -> 
+                    printfn $"    {i + 1}. {space.Name} (ID: {space.Id})")
+                
+                // If no spaces found but connection worked, might need to use default space
+                if spaces.Length = 0 then
+                    printfn $"⚠️  No spaces returned - this might indicate:"
+                    printfn $"    - Using an older Octopus version without spaces"
+                    printfn $"    - API key lacks permission to list spaces"
+                    printfn $"    - Need to query default space directly"
+            | Error errorMsg ->
+                printfn $"❌ Connection failed: {errorMsg}"
+                printfn $"💡 This confirms you need to be on the VPN or check network connectivity"
+                raise (System.Exception($"Connection test failed: {errorMsg}"))
             
             // Get all projects from the specified space (or default)
             printfn $"🔍 Querying projects..."
@@ -341,10 +367,6 @@ let main () =
                 printfn $"    No projects found in the target space."
                 if spaceId.IsSome then
                     printfn $"    💡 Try using just the base URL without space ID for default space"
-                elif spaces.Length > 0 then
-                    printfn $"    💡 Try specifying a specific space:"
-                    spaces |> List.iter (fun space -> 
-                        printfn $"        --octopus-url \"{baseUrl}/app#/{space.Id}\"")
                 else
                     printfn $"    💡 This might be an older Octopus version or permission issue"
             else
@@ -355,6 +377,31 @@ let main () =
                     printfn $"    Space: {project.SpaceName}"
                     printfn $"    Description: {description}"
                     printfn $"    Disabled: {project.IsDisabled}")
+
+            // Check if user wants to search for variables
+            match getVariableSearchPattern () with
+            | Some pattern ->
+                printfn $"\n🔍 Searching for variables matching '{pattern}'..."
+                let variables = OctopusClient.searchVariables config pattern |> Async.AwaitTask |> Async.RunSynchronously
+                
+                if variables.Length > 0 then
+                    printfn $"📋 Found {variables.Length} variable(s):"
+                    variables |> List.iteri (fun i var ->
+                        let valueDisplay = if var.IsSensitive then "[SENSITIVE - Cannot retrieve]" else (var.Value |> Option.defaultValue "[Empty]")
+                        printfn $"{i + 1}. {var.Name}"
+                        printfn $"    Value: {valueDisplay}"
+                        printfn $"    Sensitive: {var.IsSensitive}"
+                        printfn $"    Scope: {var.Scope}"
+                        match var.ProjectName with
+                        | Some projectName -> printfn $"    Project: {projectName}"
+                        | None -> ()
+                        match var.LibrarySetName with
+                        | Some libName -> printfn $"    Library Set: {libName}"
+                        | None -> ()
+                        printfn "")
+                else
+                    printfn "❌ No variables found matching the pattern."
+            | None -> ()
 
             // Show cached git repos for potential matching
             let gitRepos = getGitReposFromCache ()
