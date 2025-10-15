@@ -5,6 +5,7 @@ open System.Text
 open System.Threading.Tasks
 open IO.Adapter
 open Octo.Adapter
+open GitHub.Adapter
 open BDevHud
 
 /// Extract repository name from a git URL (wrapper for GitAdapter function)

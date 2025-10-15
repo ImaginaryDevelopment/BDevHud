@@ -1,4 +1,4 @@
-namespace IO.Adapter
+namespace GitHub.Adapter
 
 open System
 open System.Threading.Tasks
@@ -165,12 +165,6 @@ module GitHubAdapter =
 
             try
                 let searchRequest = SearchRepositoriesRequest(namePattern)
-                searchRequest.In <- [| SearchIn.Name |]
-
-                if includePrivate then
-                    searchRequest.Visibility <- Nullable(RepositoryVisibility.Private)
-                else
-                    searchRequest.Visibility <- Nullable(RepositoryVisibility.Public)
 
                 let! searchResult = client.Search.SearchRepo(searchRequest)
 
