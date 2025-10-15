@@ -5,20 +5,9 @@ open System.Text
 open System.Threading.Tasks
 open IO.Adapter
 open Octo.Adapter
+open BDevHud
 
-/// Repository cache entry
-type RepoCacheEntry =
-    { Name: string
-      LastPullDate: string
-      FileSystemPath: string
-      RepoUrl: string }
-
-/// Cache file path in user data directory
-let getCacheFilePath () =
-    let userData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
-    Path.Combine(userData, "BDevHud.csv")
-
-/// Extract repository name from URL
+/// Extract repository name from a git URL (wrapper for GitAdapter function)
 let extractRepoName (url: string) : string =
     try
         let decodedUrl = HttpUtility.UrlDecode(url)
@@ -37,61 +26,6 @@ let extractRepoName (url: string) : string =
     with _ ->
         "unknown"
 
-/// Load cache from CSV file
-let loadCache () : Map<string, RepoCacheEntry> =
-    try
-        let cacheFile = getCacheFilePath ()
-
-        if File.Exists(cacheFile) then
-            File.ReadAllLines(cacheFile)
-            |> Array.skip 1 // Skip header
-            |> Array.filter (fun line -> not (String.IsNullOrWhiteSpace(line)))
-            |> Array.map (fun line ->
-                let parts = line.Split(',')
-
-                if parts.Length >= 4 then
-                    let key = parts.[2] // Use FileSystemPath as key
-
-                    let entry =
-                        { Name = parts.[0]
-                          LastPullDate = parts.[1]
-                          FileSystemPath = parts.[2]
-                          RepoUrl = parts.[3] }
-
-                    (key, entry)
-                else
-                    ("",
-                     { Name = ""
-                       LastPullDate = ""
-                       FileSystemPath = ""
-                       RepoUrl = "" }))
-            |> Array.filter (fun (key, _) -> not (String.IsNullOrEmpty(key)))
-            |> Map.ofArray
-        else
-            Map.empty
-    with _ ->
-        Map.empty
-
-/// Save cache to CSV file
-let saveCache (cache: Map<string, RepoCacheEntry>) =
-    try
-        let cacheFile = getCacheFilePath ()
-        let directory = Path.GetDirectoryName(cacheFile)
-
-        if not (Directory.Exists(directory)) then
-            Directory.CreateDirectory(directory) |> ignore
-
-        let lines =
-            [| "Name,LastPullDate,FileSystemPath,RepoUrl" |]
-            |> Array.append (
-                cache.Values
-                |> Seq.map (fun entry -> $"{entry.Name},{entry.LastPullDate},{entry.FileSystemPath},{entry.RepoUrl}")
-                |> Array.ofSeq
-            )
-
-        File.WriteAllLines(cacheFile, lines)
-    with ex ->
-        printfn $"Warning: Failed to save cache: {ex.Message}"
 
 /// Spider-search for .git folders under a root directory
 /// If no root directory is provided, searches all local drives
@@ -136,7 +70,7 @@ let displayGitFolders (gitFolders: string[]) =
         printfn $"\nFound {gitFolders.Length} .git folder(s):"
 
         // Load existing cache
-        let mutable cache = loadCache ()
+        let mutable cache = HudCache.loadCache ()
 
         gitFolders
         |> Array.iteri (fun i folder ->
@@ -197,7 +131,7 @@ let displayGitFolders (gitFolders: string[]) =
                 printfn "    (no remote configured)")
 
         // Save updated cache
-        saveCache cache
+        HudCache.saveCache cache
 
 // Get root directory from command line args or environment variable
 let getRootDirectory () =
@@ -268,7 +202,7 @@ let displayOctopusProjects (projects: OctopusClient.OctopusProjectWithGit list) 
 
 // Get git repositories from cache for Octopus matching
 let getGitReposFromCache () : (string * string) list =
-    let cache = loadCache ()
+    let cache = HudCache.loadCache ()
     cache.Values |> Seq.map (fun entry -> (entry.Name, entry.RepoUrl)) |> List.ofSeq
 
 // Display GitHub repositories (simplified for now)

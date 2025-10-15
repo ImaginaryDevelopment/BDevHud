@@ -6,6 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="HudCache.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
