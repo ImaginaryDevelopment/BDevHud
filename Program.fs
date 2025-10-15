@@ -213,6 +213,27 @@ let getVariableSearchPattern () =
         Some pattern
     | _ -> None
 
+// Get project step analysis parameter from command line (format: projectName/stepNumber)
+let getProjectStepAnalysis () =
+    let args = Environment.GetCommandLineArgs()
+    // Check for command line argument (look for --analyze-step)
+    let analyzeStepArgIndex =
+        args |> Array.tryFindIndex (fun arg -> arg = "--analyze-step" || arg = "--step-analysis")
+
+    match analyzeStepArgIndex with
+    | Some index when index + 1 < args.Length ->
+        let stepSpec = args.[index + 1]
+        printfn $"Analyzing deployment step: {stepSpec}"
+        
+        // Parse projectName/stepIdentifier format (stepIdentifier can be number or decimal like 10.1)
+        let parts = stepSpec.Split('/')
+        if parts.Length = 2 && not (String.IsNullOrWhiteSpace(parts.[0])) && not (String.IsNullOrWhiteSpace(parts.[1])) then
+            Some (parts.[0].Trim(), parts.[1].Trim())
+        else
+            printfn $"❌ Invalid format. Expected: projectName/stepIdentifier (e.g., 'MyProject/1' or 'MyProject/10.1')"
+            None
+    | _ -> None
+
 // Get Octopus API key from command line args or environment variable
 let getOctopusApiKey () =
     let args = Environment.GetCommandLineArgs()
@@ -416,6 +437,104 @@ let main () =
                         printfn "")
                 else
                     printfn "❌ No variables found matching the pattern."
+            | None -> ()
+
+            // Check if user wants to analyze a specific deployment step
+            match getProjectStepAnalysis () with
+            | Some (projectName, stepNumber) ->
+                printfn $"\n🔍 Analyzing deployment step {stepNumber} in project '{projectName}'..."
+                let stepsResult = OctopusClient.getProjectDeploymentProcess config projectName |> Async.AwaitTask |> Async.RunSynchronously
+                
+                match stepsResult with
+                | Ok steps ->
+                    // Try to match by step number (if it's an integer) or by step name (if it contains the identifier)
+                    let matchingStep = 
+                        steps |> List.tryFind (fun step -> 
+                            // First try exact step number match (if stepNumber is parseable as int)
+                            match System.Int32.TryParse(stepNumber) with
+                            | (true, stepNum) when step.StepNumber = stepNum -> true
+                            | _ -> 
+                                // Otherwise try matching by step name or position identifier
+                                step.Name.Contains(stepNumber, System.StringComparison.OrdinalIgnoreCase) ||
+                                stepNumber.Contains(step.StepNumber.ToString()))
+                    
+                    match matchingStep with
+                    | Some step ->
+                        printfn $"📋 Step Analysis: {step.Name}"
+                        printfn $"    Step Number: {step.StepNumber}"
+                        printfn $"    Action Type: {step.ActionType}"
+                        
+                        // Show PowerShell script if available
+                        match step.PowerShellScript with
+                        | Some script ->
+                            printfn $"    PowerShell Script:"
+                            printfn $"    ┌─ Script Content ─────────────────────────────────────"
+                            script.Split('\n') |> Array.iteri (fun i line -> 
+                                printfn $"    │ {i + 1:D3}: {line}")
+                            printfn $"    └─────────────────────────────────────────────────────"
+                        | None -> printfn $"    PowerShell Script: None"
+                        
+                        // Show step template information if available
+                        match step.StepTemplateId with
+                        | Some templateId ->
+                            printfn $"    Step Template: {step.StepTemplate |> Option.defaultValue templateId}"
+                            printfn $"    🔍 Fetching template details..."
+                            
+                            let templateResult = OctopusClient.getStepTemplate config templateId |> Async.AwaitTask |> Async.RunSynchronously
+                            match templateResult with
+                            | Ok templateInfo ->
+                                printfn $"    Template Name: {templateInfo.Name}"
+                                printfn $"    Template Description: {templateInfo.Description}"
+                                
+                                match templateInfo.GitRepositoryUrl with
+                                | Some gitUrl ->
+                                    printfn $"    🔗 Git Repository: {gitUrl}"
+                                    match templateInfo.GitPath with
+                                    | Some gitPath -> printfn $"    📁 Git Path: {gitPath}"
+                                    | None -> ()
+                                | None -> ()
+                                
+                                match templateInfo.PowerShellScript with
+                                | Some templateScript ->
+                                    printfn $"    Template PowerShell Script:"
+                                    printfn $"    ┌─ Template Script Content ───────────────────────────"
+                                    templateScript.Split('\n') |> Array.iteri (fun i line -> 
+                                        printfn $"    │ {i + 1:D3}: {line}")
+                                    printfn $"    └─────────────────────────────────────────────────────"
+                                | None -> printfn $"    Template PowerShell Script: None"
+                            | Error err ->
+                                printfn $"    ❌ Error fetching template: {err}"
+                        | None -> printfn $"    Step Template: None (inline step)"
+                        
+                        // Show variables count
+                        printfn $"    Variables Available: {step.Variables.Length}"
+                        if step.Variables.Length > 0 then
+                            printfn $"    🔧 Project Variables:"
+                            step.Variables |> List.take (min 5 step.Variables.Length) |> List.iter (fun var ->
+                                let valueDisplay = if var.IsSensitive then "[SENSITIVE]" else (var.Value |> Option.defaultValue "[Empty]")
+                                printfn $"      - {var.Name}: {valueDisplay}")
+                            if step.Variables.Length > 5 then
+                                printfn $"      ... and {step.Variables.Length - 5} more variables"
+                        
+                        // Show key properties
+                        printfn $"    Properties: {step.Properties.Count}"
+                        if step.Properties.Count > 0 then
+                            printfn $"    🔧 Key Properties:"
+                            step.Properties 
+                            |> Map.toList 
+                            |> List.filter (fun (key, _) -> 
+                                key.Contains("Script") || key.Contains("Template") || key.Contains("Package"))
+                            |> List.take 5
+                            |> List.iter (fun (key, value) ->
+                                let displayValue = if value.Length > 100 then value.Substring(0, 100) + "..." else value
+                                printfn $"      - {key}: {displayValue}")
+                    | None ->
+                        printfn $"❌ Step '{stepNumber}' not found in project '{projectName}'"
+                        printfn $"Available steps:"
+                        steps |> List.iter (fun step ->
+                            printfn $"  {step.StepNumber}. {step.Name}")
+                | Error err ->
+                    printfn $"❌ Error analyzing project: {err}"
             | None -> ()
 
             // Show cached git repos for potential matching

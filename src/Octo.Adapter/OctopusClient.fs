@@ -214,3 +214,142 @@ module OctopusClient =
                 allVariables
                 |> List.filter (fun var -> var.Name.ToLower().Contains(pattern))
         }
+
+    /// Type for representing deployment process steps
+    type DeploymentStep =
+        { Name: string
+          StepNumber: int
+          ActionType: string
+          PowerShellScript: string option
+          StepTemplate: string option
+          StepTemplateId: string option
+          Variables: OctopusVariable list
+          Properties: Map<string, string> }
+
+    /// Type for step template information
+    type StepTemplateInfo =
+        { Id: string
+          Name: string
+          Description: string
+          PowerShellScript: string option
+          GitRepositoryUrl: string option
+          GitPath: string option }
+
+    /// Get deployment process for a project by name
+    let getProjectDeploymentProcess (config: OctopusConfig) (projectName: string) : Task<Result<DeploymentStep list, string>> =
+        task {
+            try
+                let repository = createRepository config
+                let project = repository.Projects.FindByName projectName
+                
+                if isNull project then
+                    return Error $"Project '{projectName}' not found"
+                else
+                    let deploymentProcess = repository.DeploymentProcesses.Get(project.DeploymentProcessId)
+                    let projectVariables = repository.VariableSets.Get(project.VariableSetId)
+                    
+                    let steps = 
+                        deploymentProcess.Steps
+                        |> Seq.mapi (fun index step ->
+                            let actions = step.Actions |> List.ofSeq
+                            
+                            // Get the primary action (usually the first one)
+                            match actions with
+                            | action :: _ ->
+                                let powerShellScript = 
+                                    if action.Properties.ContainsKey("Octopus.Action.Script.ScriptBody") then
+                                        Some (action.Properties.["Octopus.Action.Script.ScriptBody"].Value)
+                                    else None
+                                
+                                let stepTemplate = 
+                                    if action.Properties.ContainsKey("Octopus.Action.Template.Id") then
+                                        Some (action.Properties.["Octopus.Action.Template.Id"].Value)
+                                    else None
+                                
+                                let stepTemplateName = 
+                                    if action.Properties.ContainsKey("Octopus.Action.Template.Name") then
+                                        Some (action.Properties.["Octopus.Action.Template.Name"].Value)
+                                    else None
+                                
+                                let properties = 
+                                    action.Properties 
+                                    |> Seq.map (fun kvp -> kvp.Key, kvp.Value.Value)
+                                    |> Map.ofSeq
+                                
+                                // Get variables relevant to this step
+                                let stepVariables = 
+                                    projectVariables.Variables
+                                    |> Seq.map (fun variable -> 
+                                        { Name = variable.Name
+                                          Value = if variable.IsSensitive then None else Some variable.Value
+                                          IsSensitive = variable.IsSensitive  
+                                          Scope = "Project"
+                                          ProjectName = Some projectName
+                                          LibrarySetName = None })
+                                    |> List.ofSeq
+                                
+                                { Name = step.Name
+                                  StepNumber = index + 1
+                                  ActionType = action.ActionType
+                                  PowerShellScript = powerShellScript
+                                  StepTemplate = stepTemplateName
+                                  StepTemplateId = stepTemplate
+                                  Variables = stepVariables
+                                  Properties = properties }
+                            | [] ->
+                                { Name = step.Name
+                                  StepNumber = index + 1
+                                  ActionType = "Unknown"
+                                  PowerShellScript = None
+                                  StepTemplate = None
+                                  StepTemplateId = None
+                                  Variables = []
+                                  Properties = Map.empty })
+                        |> List.ofSeq
+                    
+                    return Ok steps
+            with
+            | ex -> return Error ex.Message
+        }
+
+    /// Get step template information by ID
+    let getStepTemplate (config: OctopusConfig) (templateId: string) : Task<Result<StepTemplateInfo, string>> =
+        task {
+            try
+                let repository = createRepository config
+                let template = repository.ActionTemplates.Get(templateId)
+                
+                if isNull template then
+                    return Error $"Step template '{templateId}' not found"
+                else
+                    let powerShellScript = 
+                        if template.Properties.ContainsKey("Octopus.Action.Script.ScriptBody") then
+                            Some (template.Properties.["Octopus.Action.Script.ScriptBody"].Value)
+                        else None
+                    
+                    // Check if template references a Git repository
+                    let gitRepoUrl = 
+                        if template.Properties.ContainsKey("Octopus.Action.Script.ScriptSource") && 
+                           template.Properties.["Octopus.Action.Script.ScriptSource"].Value = "GitRepository" then
+                            template.Properties.TryGetValue("Octopus.Action.GitRepository.Source") |> function
+                            | (true, value) -> Some (value.Value)
+                            | _ -> None
+                        else None
+                    
+                    let gitPath = 
+                        if template.Properties.ContainsKey("Octopus.Action.Script.ScriptFileName") then
+                            Some (template.Properties.["Octopus.Action.Script.ScriptFileName"].Value)
+                        else None
+                    
+                    let stepTemplateInfo = 
+                        { Id = template.Id
+                          Name = template.Name
+                          Description = if isNull template.Description then "" else template.Description
+                          PowerShellScript = powerShellScript
+                          GitRepositoryUrl = gitRepoUrl
+                          GitPath = gitPath }
+                    
+                    return Ok stepTemplateInfo
+            with
+            | ex -> return Error ex.Message
+        }
