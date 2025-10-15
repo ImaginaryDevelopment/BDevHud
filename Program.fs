@@ -184,6 +184,21 @@ let getOctopusUrl () =
         else
             None
 
+// Format API key for display (show first 8 chars like Octopus UI, but ensure security)
+let formatApiKeyForDisplay (apiKey: string) =
+    if isNull apiKey then
+        "[NULL]"
+    elif String.IsNullOrWhiteSpace(apiKey) then
+        "[EMPTY OR WHITESPACE]"
+    elif apiKey.Length > 10 then
+        // Show first 8 chars, mask the rest (ensuring at least 3 chars are hidden)
+        let visible = apiKey.Substring(0, 8)
+        let masked = String.replicate (apiKey.Length - 8) "*"
+        $"{visible}{masked} (length {apiKey.Length})"
+    else
+        // For short keys, don't show any characters for security
+        $"[REDACTED - length {apiKey.Length}]"
+
 // Get Octopus variable search pattern from command line
 let getVariableSearchPattern () =
     let args = Environment.GetCommandLineArgs()
@@ -209,14 +224,14 @@ let getOctopusApiKey () =
     match apiKeyArgIndex with
     | Some index when index + 1 < args.Length ->
         let apiKey = args.[index + 1]
-        printfn "Using command line Octopus API key: [REDACTED]"
+        printfn $"Using command line Octopus API key: {formatApiKeyForDisplay apiKey}"
         Some apiKey
     | _ ->
         // Check for OCTO_API_KEY environment variable
         let apiKey = Environment.GetEnvironmentVariable("OCTO_API_KEY")
 
         if not (String.IsNullOrEmpty(apiKey)) then
-            printfn "Using OCTO_API_KEY environment variable: [REDACTED]"
+            printfn $"Using OCTO_API_KEY environment variable: {formatApiKeyForDisplay apiKey}"
             Some apiKey
         else
             None
@@ -323,7 +338,7 @@ let main () =
             let targetSpace = spaceId |> Option.defaultValue "Default"
             printfn $"🔗 Connecting to Octopus Deploy..."
             printfn $"    Server: {baseUrl}"
-            printfn $"    API Key: [REDACTED - length {apiKey.Length}]"
+            printfn $"    API Key: {formatApiKeyForDisplay apiKey}"
             printfn $"    Target Space: {targetSpace}"
             
             // First, test connectivity with a proper connection test
