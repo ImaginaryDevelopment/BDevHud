@@ -2,7 +2,9 @@
 open System.IO
 open System.Web
 open System.Text
+open System.Threading.Tasks
 open IO.Adapter
+open Octo.Adapter
 
 /// Repository cache entry
 type RepoCacheEntry =
@@ -202,8 +204,16 @@ let getRootDirectory () =
     let args = Environment.GetCommandLineArgs()
 
     // Check for command line argument (skip the first arg which is the program name)
-    if args.Length > 1 then
-        let rootPath = args.[1]
+    // Look for positional arguments that aren't Octopus-related
+    let positionalArgs =
+        args
+        |> Array.skip 1
+        |> Array.filter (fun arg ->
+            not (arg.StartsWith("--") || arg.StartsWith("-"))
+            && not (arg.StartsWith("http"))) // Filter out URLs
+
+    if positionalArgs.Length > 0 then
+        let rootPath = positionalArgs.[0]
         printfn $"Using command line root directory: {rootPath}"
         Some rootPath
     else
@@ -217,6 +227,50 @@ let getRootDirectory () =
             printfn "No root directory specified. Searching all local drives."
             None
 
+// Get Octopus URL from command line args or environment variable
+let getOctopusUrl () =
+    let args = Environment.GetCommandLineArgs()
+
+    // Check for command line argument (look for --octopus-url or -o)
+    let octopusArgIndex =
+        args |> Array.tryFindIndex (fun arg -> arg = "--octopus-url" || arg = "-o")
+
+    match octopusArgIndex with
+    | Some index when index + 1 < args.Length ->
+        let octopusUrl = args.[index + 1]
+        printfn $"Using command line Octopus URL: {octopusUrl}"
+        Some octopusUrl
+    | _ ->
+        // Check for OCTOPUS_URL environment variable
+        let octopusUrl = Environment.GetEnvironmentVariable("OCTOPUS_URL")
+
+        if not (String.IsNullOrEmpty(octopusUrl)) then
+            printfn $"Using OCTOPUS_URL environment variable: {octopusUrl}"
+            Some octopusUrl
+        else
+            None
+
+// Display Octopus projects with git repository information
+let displayOctopusProjects (projects: OctopusClient.OctopusProjectWithGit list) =
+    if projects.Length = 0 then
+        printfn "No Octopus projects found."
+    else
+        printfn $"\nFound {projects.Length} Octopus project(s):"
+
+        projects
+        |> List.iteri (fun i project ->
+            printfn $"{i + 1}. {project.ProjectName}"
+            printfn $"    Octopus URL: {project.OctopusUrl}"
+
+            match project.GitRepoUrl with
+            | Some gitUrl -> printfn $"    Git Repository: {gitUrl}"
+            | None -> printfn $"    Git Repository: (not found)")
+
+// Get git repositories from cache for Octopus matching
+let getGitReposFromCache () : (string * string) list =
+    let cache = loadCache ()
+    cache.Values |> Seq.map (fun entry -> (entry.Name, entry.RepoUrl)) |> List.ofSeq
+
 // Main program entry point
 let main () =
     printfn "Git Folder Spider Search"
@@ -225,6 +279,27 @@ let main () =
     let rootDirectory = getRootDirectory ()
     let gitFolders = findGitFolders rootDirectory
     displayGitFolders gitFolders
+
+    // Check for Octopus URL and display Octopus projects
+    let octopusUrl = getOctopusUrl ()
+
+    match octopusUrl with
+    | Some url ->
+        printfn "\n%s" (String.replicate 50 "=")
+        printfn "Octopus Deploy Integration"
+        printfn "%s" (String.replicate 50 "=")
+
+        // Note: This is a simplified example - in a real implementation,
+        // you would need to handle API keys, authentication, etc.
+        printfn $"Octopus URL found: {url}"
+        printfn "Note: Full Octopus integration requires API key configuration."
+        printfn "This would connect to Octopus and match projects with git repositories."
+
+        // For demonstration, show what would happen with cached git repos
+        let gitRepos = getGitReposFromCache ()
+        printfn $"\nFound {gitRepos.Length} git repositories in cache for potential matching:"
+        gitRepos |> List.iter (fun (name, url) -> printfn $"  - {name}: {url}")
+    | None -> printfn "\nNo Octopus URL specified. Use --octopus-url <url> or set OCTOPUS_URL environment variable."
 
     printfn "\nSearch completed."
 

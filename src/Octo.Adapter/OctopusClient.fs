@@ -101,3 +101,35 @@ module OctopusClient =
                 let projects = repository.Projects.Get()
                 return projects |> Seq.map projectToRecord |> List.ofSeq
         }
+
+    /// Result type for Octopus project with related git repository information
+    type OctopusProjectWithGit =
+        { OctopusUrl: string
+          ProjectName: string
+          GitRepoUrl: string option }
+
+    /// Get all projects from Octopus and match them with git repositories
+    let getProjectsWithGitInfo
+        (config: OctopusConfig)
+        (gitRepos: (string * string) list)
+        : Task<OctopusProjectWithGit list> =
+        task {
+            let! projects = getAllProjects config
+
+            return
+                projects
+                |> List.map (fun project ->
+                    // Try to find matching git repository by project name
+                    let matchingGitRepo =
+                        gitRepos
+                        |> List.tryFind (fun (repoName, repoUrl) ->
+                            // Simple name matching - could be enhanced with more sophisticated logic
+                            repoName.ToLower().Contains(project.Name.ToLower())
+                            || project.Name.ToLower().Contains(repoName.ToLower()))
+
+                    let gitRepoUrl = matchingGitRepo |> Option.map snd
+
+                    { OctopusUrl = config.ServerUrl
+                      ProjectName = project.Name
+                      GitRepoUrl = gitRepoUrl })
+        }
