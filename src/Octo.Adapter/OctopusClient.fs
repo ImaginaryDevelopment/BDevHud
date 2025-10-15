@@ -5,17 +5,21 @@ open System.Threading.Tasks
 open Octopus.Client
 open Octopus.Client.Model
 
+type SpaceType =
+    | SpaceName of string
+    | SpaceId of string
+
 type OctopusConfig =
     { ServerUrl: string
       ApiKey: string
-      SpaceId: string option }
+      Space: SpaceType option }
 
 type OctopusProject =
     { Id: string
       Name: string
       Description: string
       IsDisabled: bool
-      SpaceId: string }
+      SpaceName: string }
 
 module OctopusClient =
 
@@ -23,11 +27,12 @@ module OctopusClient =
         let endpoint = OctopusServerEndpoint(config.ServerUrl, config.ApiKey)
         OctopusRepository(endpoint)
 
-    let private createRepositoryForSpace (config: OctopusConfig) (spaceId: string) =
-        let endpoint = OctopusServerEndpoint(config.ServerUrl, config.ApiKey)
-        OctopusRepository(endpoint, RepositoryScope.ForSpace(SpaceResource(Id = spaceId)))
+    let private resolveSpace (repository: OctopusRepository) (spaceType: SpaceType) : SpaceResource =
+        match spaceType with
+        | SpaceName name -> repository.Spaces.FindByName name
+        | SpaceId id -> repository.Spaces.Get id
 
-    let private projectToRecord (project: ProjectResource) : OctopusProject =
+    let private projectToRecord (spaceName: string) (project: ProjectResource) : OctopusProject =
         { Id = project.Id
           Name = project.Name
           Description =
@@ -36,7 +41,22 @@ module OctopusClient =
             else
                 project.Description
           IsDisabled = project.IsDisabled
-          SpaceId = project.SpaceId }
+          SpaceName = spaceName }
+
+    /// Test connection to Octopus server by attempting to find the default space
+    let testConnection (config: OctopusConfig) : Task<Result<string, string>> =
+        task {
+            try
+                let repository = createRepository config
+                // Try to find the default space - this should force a real network call
+                let defaultSpace = repository.Spaces.FindByName "Default"
+                if isNull defaultSpace then
+                    return Ok "Connected successfully (Default space not found - might be older Octopus version)"
+                else
+                    return Ok $"Connected successfully (Found default space: {defaultSpace.Name})"
+            with
+            | ex -> return Error ex.Message
+        }
 
     /// Get all spaces available in the Octopus instance
     let getSpaces (config: OctopusConfig) : Task<SpaceResource list> =
@@ -46,12 +66,16 @@ module OctopusClient =
             return spaces |> List.ofSeq
         }
 
-    /// Get projects from a specific space ID
-    let getProjectsFromSpaceId (config: OctopusConfig) (spaceId: string) : Task<OctopusProject list> =
+    /// Get projects from a specific space
+    let getProjectsFromSpace (config: OctopusConfig) (spaceType: SpaceType) : Task<OctopusProject list> =
         task {
-            let repository = createRepositoryForSpace config spaceId
-            let projects = repository.Projects.Get()
-            return projects |> Seq.map projectToRecord |> List.ofSeq
+            let repository = createRepository config
+            use client = repository.Client
+            let space = resolveSpace repository spaceType
+            let repositoryForSpace = client.ForSpace space
+            let projects = repositoryForSpace.Projects.GetAll()
+            let spaceName = space.Name
+            return projects |> Seq.map (projectToRecord spaceName) |> List.ofSeq
         }
 
     /// Parse space ID from a space URL (e.g., "https://octopus.company.com/app#/Spaces-123")
@@ -84,22 +108,20 @@ module OctopusClient =
             match parseSpaceIdFromUrl spaceUrl with
             | Some spaceId ->
                 try
-                    let! projects = getProjectsFromSpaceId config spaceId
+                    let! projects = getProjectsFromSpace config (SpaceId spaceId)
                     return Ok projects
                 with ex ->
                     return Error $"Failed to get projects from space {spaceId}: {ex.Message}"
             | None -> return Error $"Could not parse space ID from URL: {spaceUrl}"
         }
 
-    /// Get all projects from the default space (if no space is specified in config)
+    /// Get all projects from the specified space (if no space is specified in config, use default)
     let getAllProjects (config: OctopusConfig) : Task<OctopusProject list> =
         task {
-            match config.SpaceId with
-            | Some spaceId -> return! getProjectsFromSpaceId config spaceId
+            match config.Space with
+            | Some spaceType -> return! getProjectsFromSpace config spaceType
             | None ->
-                let repository = createRepository config
-                let projects = repository.Projects.Get()
-                return projects |> Seq.map projectToRecord |> List.ofSeq
+                return! getProjectsFromSpace config (SpaceName "default")
         }
 
     /// Result type for Octopus project with related git repository information
@@ -132,4 +154,202 @@ module OctopusClient =
                     { OctopusUrl = config.ServerUrl
                       ProjectName = project.Name
                       GitRepoUrl = gitRepoUrl })
+        }
+
+    /// Type for representing Octopus variables
+    type OctopusVariable =
+        { Name: string
+          Value: string option  // None for sensitive variables that can't be retrieved
+          IsSensitive: bool
+          Scope: string
+          ProjectName: string option
+          LibrarySetName: string option }
+
+    /// Get variables from a specific project
+    let getProjectVariables (config: OctopusConfig) (projectId: string) : Task<OctopusVariable list> =
+        task {
+            let repository = createRepository config
+            let project = repository.Projects.Get(projectId)
+            let variableSet = repository.VariableSets.Get(project.VariableSetId)
+            
+            return
+                variableSet.Variables
+                |> Seq.map (fun variable -> 
+                    { Name = variable.Name
+                      Value = if variable.IsSensitive then None else Some variable.Value
+                      IsSensitive = variable.IsSensitive  
+                      Scope = 
+                        let scopes = 
+                            [ if variable.Scope.ContainsKey(ScopeField.Environment) then 
+                                yield "Env: " + String.Join(", ", variable.Scope.[ScopeField.Environment])
+                              if variable.Scope.ContainsKey(ScopeField.Machine) then 
+                                yield "Machine: " + String.Join(", ", variable.Scope.[ScopeField.Machine])
+                              if variable.Scope.ContainsKey(ScopeField.Role) then 
+                                yield "Role: " + String.Join(", ", variable.Scope.[ScopeField.Role]) ]
+                        if scopes.IsEmpty then "All" else String.Join("; ", scopes)
+                      ProjectName = Some project.Name
+                      LibrarySetName = None })
+                |> List.ofSeq
+        }
+
+    /// Get variables from all projects
+    let getAllProjectVariables (config: OctopusConfig) : Task<OctopusVariable list> =
+        task {
+            let! projects = getAllProjects config
+            let! allVariables = 
+                projects 
+                |> List.map (fun project -> getProjectVariables config project.Id)
+                |> Task.WhenAll
+            
+            return allVariables |> Array.toList |> List.concat
+        }
+
+    /// Search for variables by name pattern (case-insensitive)
+    let searchVariables (config: OctopusConfig) (namePattern: string) : Task<OctopusVariable list> =
+        task {
+            let! allVariables = getAllProjectVariables config
+            let pattern = namePattern.ToLower()
+            
+            return 
+                allVariables
+                |> List.filter (fun var -> var.Name.ToLower().Contains(pattern))
+        }
+
+    /// Type for representing deployment process steps
+    type DeploymentStep =
+        { Name: string
+          StepNumber: int
+          ActionType: string
+          PowerShellScript: string option
+          StepTemplate: string option
+          StepTemplateId: string option
+          Variables: OctopusVariable list
+          Properties: Map<string, string> }
+
+    /// Type for step template information
+    type StepTemplateInfo =
+        { Id: string
+          Name: string
+          Description: string
+          PowerShellScript: string option
+          GitRepositoryUrl: string option
+          GitPath: string option }
+
+    /// Get deployment process for a project by name
+    let getProjectDeploymentProcess (config: OctopusConfig) (projectName: string) : Task<Result<DeploymentStep list, string>> =
+        task {
+            try
+                let repository = createRepository config
+                let project = repository.Projects.FindByName projectName
+                
+                if isNull project then
+                    return Error $"Project '{projectName}' not found"
+                else
+                    let deploymentProcess = repository.DeploymentProcesses.Get(project.DeploymentProcessId)
+                    let projectVariables = repository.VariableSets.Get(project.VariableSetId)
+                    
+                    let steps = 
+                        deploymentProcess.Steps
+                        |> Seq.mapi (fun index step ->
+                            let actions = step.Actions |> List.ofSeq
+                            
+                            // Get the primary action (usually the first one)
+                            match actions with
+                            | action :: _ ->
+                                let powerShellScript = 
+                                    if action.Properties.ContainsKey("Octopus.Action.Script.ScriptBody") then
+                                        Some (action.Properties.["Octopus.Action.Script.ScriptBody"].Value)
+                                    else None
+                                
+                                let stepTemplate = 
+                                    if action.Properties.ContainsKey("Octopus.Action.Template.Id") then
+                                        Some (action.Properties.["Octopus.Action.Template.Id"].Value)
+                                    else None
+                                
+                                let stepTemplateName = 
+                                    if action.Properties.ContainsKey("Octopus.Action.Template.Name") then
+                                        Some (action.Properties.["Octopus.Action.Template.Name"].Value)
+                                    else None
+                                
+                                let properties = 
+                                    action.Properties 
+                                    |> Seq.map (fun kvp -> kvp.Key, kvp.Value.Value)
+                                    |> Map.ofSeq
+                                
+                                // Get variables relevant to this step
+                                let stepVariables = 
+                                    projectVariables.Variables
+                                    |> Seq.map (fun variable -> 
+                                        { Name = variable.Name
+                                          Value = if variable.IsSensitive then None else Some variable.Value
+                                          IsSensitive = variable.IsSensitive  
+                                          Scope = "Project"
+                                          ProjectName = Some projectName
+                                          LibrarySetName = None })
+                                    |> List.ofSeq
+                                
+                                { Name = step.Name
+                                  StepNumber = index + 1
+                                  ActionType = action.ActionType
+                                  PowerShellScript = powerShellScript
+                                  StepTemplate = stepTemplateName
+                                  StepTemplateId = stepTemplate
+                                  Variables = stepVariables
+                                  Properties = properties }
+                            | [] ->
+                                { Name = step.Name
+                                  StepNumber = index + 1
+                                  ActionType = "Unknown"
+                                  PowerShellScript = None
+                                  StepTemplate = None
+                                  StepTemplateId = None
+                                  Variables = []
+                                  Properties = Map.empty })
+                        |> List.ofSeq
+                    
+                    return Ok steps
+            with
+            | ex -> return Error ex.Message
+        }
+
+    /// Get step template information by ID
+    let getStepTemplate (config: OctopusConfig) (templateId: string) : Task<Result<StepTemplateInfo, string>> =
+        task {
+            try
+                let repository = createRepository config
+                let template = repository.ActionTemplates.Get(templateId)
+                
+                if isNull template then
+                    return Error $"Step template '{templateId}' not found"
+                else
+                    let powerShellScript = 
+                        if template.Properties.ContainsKey("Octopus.Action.Script.ScriptBody") then
+                            Some (template.Properties.["Octopus.Action.Script.ScriptBody"].Value)
+                        else None
+                    
+                    // Check if template references a Git repository
+                    let gitRepoUrl = 
+                        if template.Properties.ContainsKey("Octopus.Action.Script.ScriptSource") && 
+                           template.Properties.["Octopus.Action.Script.ScriptSource"].Value = "GitRepository" then
+                            template.Properties.TryGetValue("Octopus.Action.GitRepository.Source") |> function
+                            | (true, value) -> Some (value.Value)
+                            | _ -> None
+                        else None
+                    
+                    let gitPath = 
+                        if template.Properties.ContainsKey("Octopus.Action.Script.ScriptFileName") then
+                            Some (template.Properties.["Octopus.Action.Script.ScriptFileName"].Value)
+                        else None
+                    
+                    let stepTemplateInfo = 
+                        { Id = template.Id
+                          Name = template.Name
+                          Description = if isNull template.Description then "" else template.Description
+                          PowerShellScript = powerShellScript
+                          GitRepositoryUrl = gitRepoUrl
+                          GitPath = gitPath }
+                    
+                    return Ok stepTemplateInfo
+            with
+            | ex -> return Error ex.Message
         }
