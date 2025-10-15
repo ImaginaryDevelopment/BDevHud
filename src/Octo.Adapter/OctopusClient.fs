@@ -5,17 +5,21 @@ open System.Threading.Tasks
 open Octopus.Client
 open Octopus.Client.Model
 
+type SpaceType =
+    | SpaceName of string
+    | SpaceId of string
+
 type OctopusConfig =
     { ServerUrl: string
       ApiKey: string
-      SpaceId: string option }
+      Space: SpaceType option }
 
 type OctopusProject =
     { Id: string
       Name: string
       Description: string
       IsDisabled: bool
-      SpaceId: string }
+      SpaceName: string }
 
 module OctopusClient =
 
@@ -23,11 +27,12 @@ module OctopusClient =
         let endpoint = OctopusServerEndpoint(config.ServerUrl, config.ApiKey)
         OctopusRepository(endpoint)
 
-    let private createRepositoryForSpace (config: OctopusConfig) (spaceId: string) =
-        let endpoint = OctopusServerEndpoint(config.ServerUrl, config.ApiKey)
-        OctopusRepository(endpoint, RepositoryScope.ForSpace(SpaceResource(Id = spaceId)))
+    let private resolveSpace (repository: OctopusRepository) (spaceType: SpaceType) : SpaceResource =
+        match spaceType with
+        | SpaceName name -> repository.Spaces.FindByName name
+        | SpaceId id -> repository.Spaces.Get id
 
-    let private projectToRecord (project: ProjectResource) : OctopusProject =
+    let private projectToRecord (spaceName: string) (project: ProjectResource) : OctopusProject =
         { Id = project.Id
           Name = project.Name
           Description =
@@ -36,7 +41,7 @@ module OctopusClient =
             else
                 project.Description
           IsDisabled = project.IsDisabled
-          SpaceId = project.SpaceId }
+          SpaceName = spaceName }
 
     /// Get all spaces available in the Octopus instance
     let getSpaces (config: OctopusConfig) : Task<SpaceResource list> =
@@ -46,12 +51,16 @@ module OctopusClient =
             return spaces |> List.ofSeq
         }
 
-    /// Get projects from a specific space ID
-    let getProjectsFromSpaceId (config: OctopusConfig) (spaceId: string) : Task<OctopusProject list> =
+    /// Get projects from a specific space
+    let getProjectsFromSpace (config: OctopusConfig) (spaceType: SpaceType) : Task<OctopusProject list> =
         task {
-            let repository = createRepositoryForSpace config spaceId
-            let projects = repository.Projects.Get()
-            return projects |> Seq.map projectToRecord |> List.ofSeq
+            let repository = createRepository config
+            use client = repository.Client
+            let space = resolveSpace repository spaceType
+            let repositoryForSpace = client.ForSpace space
+            let projects = repositoryForSpace.Projects.GetAll()
+            let spaceName = space.Name
+            return projects |> Seq.map (projectToRecord spaceName) |> List.ofSeq
         }
 
     /// Parse space ID from a space URL (e.g., "https://octopus.company.com/app#/Spaces-123")
@@ -84,22 +93,20 @@ module OctopusClient =
             match parseSpaceIdFromUrl spaceUrl with
             | Some spaceId ->
                 try
-                    let! projects = getProjectsFromSpaceId config spaceId
+                    let! projects = getProjectsFromSpace config (SpaceId spaceId)
                     return Ok projects
                 with ex ->
                     return Error $"Failed to get projects from space {spaceId}: {ex.Message}"
             | None -> return Error $"Could not parse space ID from URL: {spaceUrl}"
         }
 
-    /// Get all projects from the default space (if no space is specified in config)
+    /// Get all projects from the specified space (if no space is specified in config, use default)
     let getAllProjects (config: OctopusConfig) : Task<OctopusProject list> =
         task {
-            match config.SpaceId with
-            | Some spaceId -> return! getProjectsFromSpaceId config spaceId
+            match config.Space with
+            | Some spaceType -> return! getProjectsFromSpace config spaceType
             | None ->
-                let repository = createRepository config
-                let projects = repository.Projects.Get()
-                return projects |> Seq.map projectToRecord |> List.ofSeq
+                return! getProjectsFromSpace config (SpaceName "default")
         }
 
     /// Result type for Octopus project with related git repository information

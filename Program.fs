@@ -184,6 +184,29 @@ let getOctopusUrl () =
         else
             None
 
+// Get Octopus API key from command line args or environment variable
+let getOctopusApiKey () =
+    let args = Environment.GetCommandLineArgs()
+
+    // Check for command line argument (look for --octopus-api-key or --api-key)
+    let apiKeyArgIndex =
+        args |> Array.tryFindIndex (fun arg -> arg = "--octopus-api-key" || arg = "--api-key")
+
+    match apiKeyArgIndex with
+    | Some index when index + 1 < args.Length ->
+        let apiKey = args.[index + 1]
+        printfn "Using command line Octopus API key: [REDACTED]"
+        Some apiKey
+    | _ ->
+        // Check for OCTO_API_KEY environment variable
+        let apiKey = Environment.GetEnvironmentVariable("OCTO_API_KEY")
+
+        if not (String.IsNullOrEmpty(apiKey)) then
+            printfn "Using OCTO_API_KEY environment variable: [REDACTED]"
+            Some apiKey
+        else
+            None
+
 // Display Octopus projects with git repository information
 let displayOctopusProjects (projects: OctopusClient.OctopusProjectWithGit list) =
     if projects.Length = 0 then
@@ -221,26 +244,157 @@ let main () =
     let gitFolders = findGitFolders rootDirectory
     displayGitFolders gitFolders
 
-    // Check for Octopus URL and display Octopus projects
+    // Check for Octopus URL and API key, then display Octopus projects
     let octopusUrl = getOctopusUrl ()
+    let octopusApiKey = getOctopusApiKey ()
 
-    match octopusUrl with
-    | Some url ->
+    match octopusUrl, octopusApiKey with
+    | Some url, Some apiKey ->
         printfn "\n%s" (String.replicate 50 "=")
         printfn "Octopus Deploy Integration"
         printfn "%s" (String.replicate 50 "=")
 
-        // Note: This is a simplified example - in a real implementation,
-        // you would need to handle API keys, authentication, etc.
-        printfn $"Octopus URL found: {url}"
-        printfn "Note: Full Octopus integration requires API key configuration."
-        printfn "This would connect to Octopus and match projects with git repositories."
+        try
+            // Parse the URL to extract base server URL and space ID
+            let (baseUrl, spaceId) = 
+                try
+                    let uri = Uri(url)
+                    let portPart = if uri.Port <> -1 then $":{uri.Port}" else ""
+                    
+                    // Preserve the path part (like /api) but remove fragment
+                    let pathPart = 
+                        if String.IsNullOrEmpty(uri.AbsolutePath) || uri.AbsolutePath = "/" then 
+                            ""
+                        else 
+                            uri.AbsolutePath.TrimEnd('/')
+                    
+                    let baseServerUrl = $"{uri.Scheme}://{uri.Host}{portPart}{pathPart}"
+                    
+                    // Check if URL contains space identifier in fragment
+                    let extractedSpaceId = 
+                        if not (String.IsNullOrEmpty(uri.Fragment)) then
+                            let fragment = uri.Fragment.TrimStart('#')
+                            if fragment.Contains("/Spaces-") then
+                                let spacePart = fragment.Split([|"/Spaces-"|], StringSplitOptions.RemoveEmptyEntries)
+                                if spacePart.Length > 1 then
+                                    Some ("Spaces-" + spacePart.[1].Split('/').[0])
+                                else None
+                            elif fragment.StartsWith("Spaces-") then
+                                Some (fragment.Split('/').[0])
+                            else None
+                        else None
+                    
+                    let spaceDisplay = extractedSpaceId |> Option.defaultValue "(default space)"
+                    printfn $"🔍 Parsed URL:"
+                    printfn $"    Base Server URL: {baseServerUrl}"
+                    printfn $"    Extracted Space ID: {spaceDisplay}"
+                    
+                    (baseServerUrl, extractedSpaceId)
+                with 
+                | ex -> 
+                    printfn $"⚠️  URL parsing warning: {ex.Message}"
+                    printfn $"    Using URL as-is: {url}"
+                    (url, None)
 
-        // For demonstration, show what would happen with cached git repos
-        let gitRepos = getGitReposFromCache ()
-        printfn $"\nFound {gitRepos.Length} git repositories in cache for potential matching:"
-        gitRepos |> List.iter (fun (name, url) -> printfn $"  - {name}: {url}")
-    | None -> printfn "\nNo Octopus URL specified. Use --octopus-url <url> or set OCTOPUS_URL environment variable."
+            let spaceType = 
+                match spaceId with 
+                | Some id -> Some (Octo.Adapter.SpaceId id)
+                | None -> None
+
+            let config = 
+                { ServerUrl = baseUrl
+                  ApiKey = apiKey
+                  Space = spaceType }
+
+            let targetSpace = spaceId |> Option.defaultValue "Default"
+            printfn $"🔗 Connecting to Octopus Deploy..."
+            printfn $"    Server: {baseUrl}"
+            printfn $"    API Key: [REDACTED - length {apiKey.Length}]"
+            printfn $"    Target Space: {targetSpace}"
+            
+            // First, try to get spaces to test connectivity
+            printfn $"🔍 Testing connection by listing available spaces..."
+            printfn $"    Making API call to: {baseUrl}/api/spaces"
+            let spaces = OctopusClient.getSpaces config |> Async.AwaitTask |> Async.RunSynchronously
+            printfn $"✅ Connection successful! Found {spaces.Length} space(s):"
+            spaces |> List.iteri (fun i space -> 
+                printfn $"    {i + 1}. {space.Name} (ID: {space.Id})")
+                
+            // If no spaces found but connection worked, might need to use default space
+            if spaces.Length = 0 then
+                printfn $"⚠️  No spaces returned - this might indicate:"
+                printfn $"    - Using an older Octopus version without spaces"
+                printfn $"    - API key lacks permission to list spaces"
+                printfn $"    - Need to query default space directly"
+            
+            // Get all projects from the specified space (or default)
+            printfn $"🔍 Querying projects..."
+            let projectApiUrl = 
+                match spaceId with
+                | Some space -> $"{baseUrl}/api/{space}/projects"
+                | None -> $"{baseUrl}/api/projects"
+            printfn $"    Making API call to: {projectApiUrl}"
+            let projects = OctopusClient.getAllProjects config |> Async.AwaitTask |> Async.RunSynchronously
+            
+            printfn $"📋 Found {projects.Length} Octopus project(s):"
+            if projects.Length = 0 then
+                printfn $"    No projects found in the target space."
+                if spaceId.IsSome then
+                    printfn $"    💡 Try using just the base URL without space ID for default space"
+                elif spaces.Length > 0 then
+                    printfn $"    💡 Try specifying a specific space:"
+                    spaces |> List.iter (fun space -> 
+                        printfn $"        --octopus-url \"{baseUrl}/app#/{space.Id}\"")
+                else
+                    printfn $"    💡 This might be an older Octopus version or permission issue"
+            else
+                projects |> List.iteri (fun i project ->
+                    let description = if String.IsNullOrEmpty(project.Description) then "(no description)" else project.Description
+                    printfn $"{i + 1}. {project.Name}"
+                    printfn $"    ID: {project.Id}"
+                    printfn $"    Space: {project.SpaceName}"
+                    printfn $"    Description: {description}"
+                    printfn $"    Disabled: {project.IsDisabled}")
+
+            // Show cached git repos for potential matching
+            let gitRepos = getGitReposFromCache ()
+            if gitRepos.Length > 0 then
+                printfn $"\n📁 Found {gitRepos.Length} git repositories in cache for potential matching:"
+                gitRepos |> List.iter (fun (name, url) -> printfn $"  - {name}: {url}")
+            else
+                printfn "\n📁 No git repositories found in cache. Run the git scan first to populate the cache."
+
+        with
+        | ex -> 
+            printfn $"❌ Error connecting to Octopus Deploy:"
+            printfn $"    {ex.Message}"
+            if ex.InnerException <> null then
+                printfn $"    Inner exception: {ex.InnerException.Message}"
+            printfn $"💡 Troubleshooting tips:"
+            printfn $"    - Ensure the server URL is correct (just base URL, not browser URL)"
+            printfn $"    - Verify your API key has sufficient permissions"
+            printfn $"    - Check if the server is accessible from your network"
+            printfn $"    - Try using just the base URL: https://octopus.rbxd.ds/"
+    
+    | Some url, None ->
+        printfn "\n%s" (String.replicate 50 "=")
+        printfn "Octopus Deploy Integration"
+        printfn "%s" (String.replicate 50 "=")
+        printfn $"Octopus URL found: {url}"
+        printfn "❌ No API key provided. Use --octopus-api-key <key> or set OCTO_API_KEY environment variable."
+    
+    | None, Some _ ->
+        printfn "\n❌ Octopus API key provided but no URL. Use --octopus-url <url> or set OCTOPUS_URL environment variable."
+    
+    | None, None ->
+        printfn "\nNo Octopus integration configured."
+        printfn "Use --octopus-url <url> --octopus-api-key <key> or set OCTOPUS_URL and OCTO_API_KEY environment variables."
+        printfn ""
+        printfn "URL Examples:"
+        printfn "  Base server: https://octopus.rbxd.ds/"
+        printfn "  With space: https://octopus.rbxd.ds/app#/Spaces-1"
+        printfn "  Environment variable: $env:OCTOPUS_URL=\"https://octopus.rbxd.ds/\""
+        printfn "  Environment variable: $env:OCTO_API_KEY=\"API-YOURKEY\""
 
     // GitHub Integration Demo
     printfn "\n%s" (String.replicate 50 "=")
