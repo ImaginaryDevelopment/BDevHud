@@ -271,6 +271,13 @@ let getGitReposFromCache () : (string * string) list =
     let cache = loadCache ()
     cache.Values |> Seq.map (fun entry -> (entry.Name, entry.RepoUrl)) |> List.ofSeq
 
+// Display GitHub repositories (simplified for now)
+let displayGitHubRepositories (repos: obj list) =
+    if repos.Length = 0 then
+        printfn "No GitHub repositories found."
+    else
+        printfn $"\nFound {repos.Length} GitHub repository(ies) (details would be shown here)"
+
 // Main program entry point
 let main () =
     printfn "Git Folder Spider Search"
@@ -300,6 +307,28 @@ let main () =
         printfn $"\nFound {gitRepos.Length} git repositories in cache for potential matching:"
         gitRepos |> List.iter (fun (name, url) -> printfn $"  - {name}: {url}")
     | None -> printfn "\nNo Octopus URL specified. Use --octopus-url <url> or set OCTOPUS_URL environment variable."
+
+    // GitHub Integration Demo
+    printfn "\n%s" (String.replicate 50 "=")
+    printfn "GitHub Integration Demo"
+    printfn "%s" (String.replicate 50 "=")
+
+    // Check for GitHub token
+    let githubToken = Environment.GetEnvironmentVariable("GITHUB_TOKEN")
+
+    if not (String.IsNullOrEmpty(githubToken)) then
+        printfn $"GitHub integration enabled with token authentication"
+        printfn "Note: This would query GitHub API for repositories with wildcard filtering."
+        printfn "Example usage:"
+        printfn "  - Get all accessible repos: GitHubAdapter.getRepositories config None"
+        printfn "  - Filter by pattern: GitHubAdapter.getRepositories config (Some \"*test*\")"
+        printfn "  - Get org repos: GitHubAdapter.getOrganizationRepositories config \"orgname\" None"
+        printfn "  - Search across all repos: GitHubAdapter.searchRepositories config \"*api*\" false"
+    else
+        printfn "GitHub integration not configured."
+        printfn "Set GITHUB_TOKEN environment variable to enable."
+        printfn "Example:"
+        printfn "  $env:GITHUB_TOKEN=\"your_token_here\""
 
     printfn "\nSearch completed."
 
