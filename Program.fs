@@ -450,18 +450,23 @@ let main () =
                     // Try to match by step number (if it's an integer) or by step name (if it contains the identifier)
                     let matchingStep = 
                         steps |> List.tryFind (fun step -> 
-                            // First try exact step number match (if stepNumber is parseable as int)
+                            // Try multiple matching strategies:
+                            // 1. Exact step number match (if stepNumber is parseable as int)
                             match System.Int32.TryParse(stepNumber) with
                             | (true, stepNum) when step.StepNumber = stepNum -> true
                             | _ -> 
-                                // Otherwise try matching by step name or position identifier
+                                // 2. Step ID contains the identifier
+                                step.StepId.Contains(stepNumber, System.StringComparison.OrdinalIgnoreCase) ||
+                                // 3. Step name contains the identifier
                                 step.Name.Contains(stepNumber, System.StringComparison.OrdinalIgnoreCase) ||
+                                // 4. Identifier contains the step number
                                 stepNumber.Contains(step.StepNumber.ToString()))
                     
                     match matchingStep with
                     | Some step ->
                         printfn $"📋 Step Analysis: {step.Name}"
                         printfn $"    Step Number: {step.StepNumber}"
+                        printfn $"    Step ID: {step.StepId}"
                         printfn $"    Action Type: {step.ActionType}"
                         
                         // Show PowerShell script if available
@@ -532,7 +537,7 @@ let main () =
                         printfn $"❌ Step '{stepNumber}' not found in project '{projectName}'"
                         printfn $"Available steps:"
                         steps |> List.iter (fun step ->
-                            printfn $"  {step.StepNumber}. {step.Name}")
+                            printfn $"  {step.StepNumber}. {step.Name} (ID: {step.StepId})")
                 | Error err ->
                     printfn $"❌ Error analyzing project: {err}"
             | None -> ()

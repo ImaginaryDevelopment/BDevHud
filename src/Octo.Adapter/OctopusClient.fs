@@ -219,6 +219,7 @@ module OctopusClient =
     type DeploymentStep =
         { Name: string
           StepNumber: int
+          StepId: string  // The actual Octopus step ID
           ActionType: string
           PowerShellScript: string option
           StepTemplate: string option
@@ -290,6 +291,7 @@ module OctopusClient =
                                 
                                 { Name = step.Name
                                   StepNumber = index + 1
+                                  StepId = step.Id
                                   ActionType = action.ActionType
                                   PowerShellScript = powerShellScript
                                   StepTemplate = stepTemplateName
@@ -299,6 +301,7 @@ module OctopusClient =
                             | [] ->
                                 { Name = step.Name
                                   StepNumber = index + 1
+                                  StepId = step.Id
                                   ActionType = "Unknown"
                                   PowerShellScript = None
                                   StepTemplate = None
