@@ -145,7 +145,8 @@ let getRootDirectory () =
         |> Array.skip 1
         |> Array.filter (fun arg ->
             not (arg.StartsWith("--") || arg.StartsWith("-"))
-            && not (arg.StartsWith("http"))) // Filter out URLs
+            && not (arg.StartsWith("http")) // Filter out URLs
+            && not (arg.StartsWith("API-"))) // Filter out API keys
 
     if positionalArgs.Length > 0 then
         let rootPath = positionalArgs.[0]
