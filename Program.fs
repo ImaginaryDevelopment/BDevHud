@@ -81,6 +81,20 @@ let shouldDebugLog () =
     let args = Environment.GetCommandLineArgs()
     args |> Array.contains "--debug" || args |> Array.contains "-d"
 
+// Check if file indexing should be performed
+let shouldIndexFiles () =
+    let args = Environment.GetCommandLineArgs()
+    args |> Array.contains "--index-files" || args |> Array.contains "--index"
+
+// Get search term from command line args
+let getSearchTerm () =
+    let args = Environment.GetCommandLineArgs()
+    
+    // Look for --search=term pattern
+    args
+    |> Array.tryFind (fun arg -> arg.StartsWith("--search="))
+    |> Option.map (fun arg -> arg.Substring(9)) // Remove "--search=" prefix
+
 /// Display results of git folder search with remote information (no git pull by default)
 let displayGitFolders (gitFolders: string[]) : GitRepoInfo list =
     if gitFolders.Length = 0 then
@@ -223,6 +237,75 @@ let performGitPulls (repoInfos: GitRepoInfo list) =
         printfn $"\nGit pull operations completed: {pullCount} attempted, {skippedCount} skipped (30-minute cooldown)"
     else
         printfn "\n💡 Use --pull-repos flag to perform git pull operations on all repositories"
+
+/// Perform file indexing on repositories if requested
+let performFileIndexing (repoInfos: GitRepoInfo list) =
+    if shouldIndexFiles() then
+        printfn "\n%s" (String.replicate 50 "=")
+        printfn "File Indexing Operations"
+        printfn "%s" (String.replicate 50 "=")
+        printfn $"Indexing Terraform and PowerShell files in {repoInfos.Length} repositories..."
+
+        let mutable totalFilesIndexed = 0
+
+        repoInfos
+        |> List.iteri (fun i repoInfo ->
+            printfn $"\n[{i + 1}/{repoInfos.Length}] Indexing repository: {repoInfo.RepoName}"
+            printfn $"    Path: {repoInfo.Path}"
+
+            try
+                // Get indexable files (terraform and powershell)
+                let indexableFiles = FileIndex.getIndexableFiles repoInfo.Path
+                printfn $"    Found {indexableFiles.Length} indexable files"
+
+                if indexableFiles.Length > 0 then
+                    // Index the repository
+                    FileIndex.indexRepository repoInfo.Path
+                    totalFilesIndexed <- totalFilesIndexed + indexableFiles.Length
+                    printfn $"    ✅ Indexed {indexableFiles.Length} files"
+                else
+                    printfn $"    ⚠️ No Terraform or PowerShell files found"
+            with
+            | ex ->
+                printfn $"    ❌ Error indexing repository: {ex.Message}")
+
+        printfn $"\nFile indexing completed: {totalFilesIndexed} total files indexed across {repoInfos.Length} repositories"
+    else
+        printfn "\n💡 Use --index-files flag to index Terraform and PowerShell files for search"
+
+/// Perform text search using trigram matching if requested
+let performTextSearch () =
+    match getSearchTerm() with
+    | Some searchTerm ->
+        printfn "\n%s" (String.replicate 50 "=")
+        printfn "Trigram Text Search"
+        printfn "%s" (String.replicate 50 "=")
+        printfn $"Searching for: '{searchTerm}'"
+        
+        // Check if we have indexed data
+        if FileIndex.hasIndexedData() then
+            let (fileCount, trigramCount, repos) = FileIndex.getIndexStats()
+            printfn $"Searching {fileCount} indexed files with {trigramCount} trigrams across {repos.Length} repositories..."
+            
+            let results = FileIndex.searchText searchTerm
+            
+            if results.Length > 0 then
+                printfn $"\nFound {results.Length} matching file(s):"
+                
+                results
+                |> List.iteri (fun i file ->
+                    printfn $"\n[{i + 1}] {file.FileType.ToUpper()} file:"
+                    printfn $"    Repository: {Path.GetFileName(file.RepoPath)}"
+                    printfn $"    File: {Path.GetFileName(file.FilePath)}"
+                    printfn $"    Full path: {file.FilePath}"
+                    printfn $"    Size: {file.FileSize} bytes")
+            else
+                printfn $"\nNo files found containing '{searchTerm}'"
+        else
+            printfn "\nNo indexed data found."
+            printfn "💡 Use --index-files flag to index Terraform and PowerShell files first"
+    | None ->
+        () // No search requested
 
 // Get root directory from command line args or environment variable
 let getRootDirectory () =
@@ -823,6 +906,12 @@ let main () =
 
     // Perform git pull operations if requested
     performGitPulls repoInfos
+
+    // Perform file indexing if requested
+    performFileIndexing repoInfos
+
+    // Perform text search if requested
+    performTextSearch ()
 
     printfn "\nSearch completed."
 
