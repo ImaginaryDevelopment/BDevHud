@@ -26,13 +26,50 @@ module SearchOperations =
                 if results.Length > 0 then
                     printfn "\nFound %d matching file(s):" results.Length
                     
-                    results
-                    |> List.iteri (fun i file ->
-                        printfn "\n[%d] %s file:" (i + 1) (file.FileType.ToUpper())
-                        printfn "    Repository: %s" (RepositoryDiscovery.getFileName file.RepoPath)
-                        printfn "    File: %s" (RepositoryDiscovery.getFileName file.FilePath)
-                        printfn "    Full path: %s" file.FilePath
-                        printfn "    Size: %d bytes" file.FileSize)
+                    // Group results by repository
+                    let groupedResults = 
+                        results
+                        |> List.groupBy (fun file -> file.RepoPath)
+                        |> List.sortBy (fun (repoPath, _) -> RepositoryDiscovery.getFileName repoPath)
+                    
+                    // Display results grouped by repository with last pull info
+                    groupedResults
+                    |> List.iteri (fun repoIndex (repoPath, filesInRepo) ->
+                        let repoName = RepositoryDiscovery.getFileName repoPath
+                        printfn "\n📁 Repository: %s (%d file(s))" repoName filesInRepo.Length
+                        
+                        // Get last successful pull information
+                        let cachedRepo = GitCache.getCachedRepo repoPath
+                        match cachedRepo with
+                        | Some cached ->
+                            match cached.LastSuccessfulPull with
+                            | Some lastPull ->
+                                let elapsed = DateTime.UtcNow - lastPull
+                                if elapsed.TotalDays >= 1.0 then
+                                    printfn "    🔄 Last successful pull: %.1f days ago" elapsed.TotalDays
+                                elif elapsed.TotalHours >= 1.0 then
+                                    printfn "    🔄 Last successful pull: %.1f hours ago" elapsed.TotalHours
+                                else
+                                    printfn "    🔄 Last successful pull: %.1f minutes ago" elapsed.TotalMinutes
+                            | None ->
+                                match cached.LastPullAttempt with
+                                | Some lastAttempt ->
+                                    let elapsed = DateTime.UtcNow - lastAttempt
+                                    printfn "    ⚠️  Last pull attempt: %.1f minutes ago (no successful pulls recorded)" elapsed.TotalMinutes
+                                | None ->
+                                    printfn "    ❓ No pull history recorded"
+                        | None ->
+                            printfn "    ❓ Repository not in cache"
+                        
+                        printfn "    📂 Path: %s" repoPath
+                        
+                        // Display files in this repository
+                        filesInRepo
+                        |> List.iteri (fun fileIndex file ->
+                            printfn "\n    [%d.%d] %s file:" (repoIndex + 1) (fileIndex + 1) (file.FileType.ToUpper())
+                            printfn "        📄 File: %s" (RepositoryDiscovery.getFileName file.FilePath)
+                            printfn "        🔗 Full path: %s" file.FilePath
+                            printfn "        📏 Size: %d bytes" file.FileSize))
                 else
                     printfn "\nNo files found containing '%s'" searchTerm
             else

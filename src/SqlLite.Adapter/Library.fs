@@ -11,6 +11,7 @@ type CachedRepoInfo = {
     RepoName: string
     RepoUrl: string
     LastPullAttempt: DateTime option
+    LastSuccessfulPull: DateTime option
 }
 
 // File information for indexing
@@ -55,6 +56,7 @@ module GitCache =
                 repo_name TEXT NOT NULL,
                 repo_url TEXT NOT NULL,
                 last_pull_attempt TEXT,
+                last_successful_pull TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -62,6 +64,19 @@ module GitCache =
         
         use command = new SqliteCommand(createTableCommand, connection)
         command.ExecuteNonQuery() |> ignore
+        
+        // Add the last_successful_pull column if it doesn't exist (migration)
+        let addColumnCommand = """
+            ALTER TABLE repo_cache ADD COLUMN last_successful_pull TEXT;
+        """
+        try
+            use addColumnCmd = new SqliteCommand(addColumnCommand, connection)
+            addColumnCmd.ExecuteNonQuery() |> ignore
+        with
+        | :? SqliteException as ex when ex.Message.Contains("duplicate column name") -> 
+            // Column already exists, ignore
+            ()
+        | _ -> reraise()
     
     // Check if enough time has elapsed since last pull attempt (30 minutes)
     let shouldAttemptPull (lastPullAttempt: DateTime option) : bool =
@@ -81,7 +96,7 @@ module GitCache =
             connection.Open()
             
             let selectCommand = """
-                SELECT path, repo_name, repo_url, last_pull_attempt
+                SELECT path, repo_name, repo_url, last_pull_attempt, last_successful_pull
                 FROM repo_cache 
                 WHERE path = @path
             """
@@ -103,11 +118,23 @@ module GitCache =
                         else
                             Some (DateTime.Parse(lastPullAttemptStr, null, System.Globalization.DateTimeStyles.RoundtripKind))
                 
+                let lastSuccessfulPullObj = reader.["last_successful_pull"]
+                let lastSuccessfulPull = 
+                    if lastSuccessfulPullObj = DBNull.Value then
+                        None
+                    else
+                        let lastSuccessfulPullStr = lastSuccessfulPullObj :?> string
+                        if String.IsNullOrEmpty(lastSuccessfulPullStr) then
+                            None
+                        else
+                            Some (DateTime.Parse(lastSuccessfulPullStr, null, System.Globalization.DateTimeStyles.RoundtripKind))
+                
                 Some {
                     Path = reader.["path"] :?> string
                     RepoName = reader.["repo_name"] :?> string
                     RepoUrl = reader.["repo_url"] :?> string
                     LastPullAttempt = lastPullAttempt
+                    LastSuccessfulPull = lastSuccessfulPull
                 }
             else
                 None
@@ -125,12 +152,13 @@ module GitCache =
             connection.Open()
             
             let upsertCommand = """
-                INSERT INTO repo_cache (path, repo_name, repo_url, last_pull_attempt, updated_at)
-                VALUES (@path, @repo_name, @repo_url, @last_pull_attempt, @updated_at)
+                INSERT INTO repo_cache (path, repo_name, repo_url, last_pull_attempt, last_successful_pull, updated_at)
+                VALUES (@path, @repo_name, @repo_url, @last_pull_attempt, @last_successful_pull, @updated_at)
                 ON CONFLICT(path) DO UPDATE SET
                     repo_name = excluded.repo_name,
                     repo_url = excluded.repo_url,
                     last_pull_attempt = excluded.last_pull_attempt,
+                    last_successful_pull = excluded.last_successful_pull,
                     updated_at = excluded.updated_at
             """
             
@@ -144,12 +172,39 @@ module GitCache =
             | Some dateTime -> command.Parameters.AddWithValue("@last_pull_attempt", dateTime.ToString("O")) |> ignore
             | None -> command.Parameters.AddWithValue("@last_pull_attempt", DBNull.Value) |> ignore
             
+            match repoInfo.LastSuccessfulPull with
+            | Some dateTime -> command.Parameters.AddWithValue("@last_successful_pull", dateTime.ToString("O")) |> ignore
+            | None -> command.Parameters.AddWithValue("@last_successful_pull", DBNull.Value) |> ignore
+            
             command.ExecuteNonQuery() |> ignore
         with
         | ex ->
             printfn $"Error writing to cache for {repoInfo.Path}: {ex.Message}"
     
     // Update just the last pull attempt timestamp
+    let updateLastSuccessfulPull (repoPath: string) : unit =
+        try
+            initializeDatabase()
+            
+            use connection = new SqliteConnection($"Data Source={dbPath}")
+            connection.Open()
+            
+            let updateCommand = """
+                UPDATE repo_cache 
+                SET last_successful_pull = @last_successful_pull, updated_at = @updated_at
+                WHERE path = @path
+            """
+            
+            use command = new SqliteCommand(updateCommand, connection)
+            command.Parameters.AddWithValue("@path", repoPath) |> ignore
+            command.Parameters.AddWithValue("@last_successful_pull", DateTime.UtcNow.ToString("O")) |> ignore
+            command.Parameters.AddWithValue("@updated_at", DateTime.UtcNow.ToString("O")) |> ignore
+            
+            command.ExecuteNonQuery() |> ignore
+        with
+        | ex ->
+            printfn $"Error updating last successful pull for {repoPath}: {ex.Message}"
+
     let updateLastPullAttempt (repoPath: string) : unit =
         try
             initializeDatabase()
@@ -182,7 +237,7 @@ module GitCache =
             connection.Open()
             
             let selectAllCommand = """
-                SELECT path, repo_name, repo_url, last_pull_attempt
+                SELECT path, repo_name, repo_url, last_pull_attempt, last_successful_pull
                 FROM repo_cache 
                 ORDER BY repo_name
             """
@@ -204,11 +259,23 @@ module GitCache =
                         else
                             Some (DateTime.Parse(lastPullAttemptStr, null, System.Globalization.DateTimeStyles.RoundtripKind))
                 
+                let lastSuccessfulPullObj = reader.["last_successful_pull"]
+                let lastSuccessfulPull = 
+                    if lastSuccessfulPullObj = DBNull.Value then
+                        None
+                    else
+                        let lastSuccessfulPullStr = lastSuccessfulPullObj :?> string
+                        if String.IsNullOrEmpty(lastSuccessfulPullStr) then
+                            None
+                        else
+                            Some (DateTime.Parse(lastSuccessfulPullStr, null, System.Globalization.DateTimeStyles.RoundtripKind))
+                
                 let repo = {
                     Path = reader.["path"] :?> string
                     RepoName = reader.["repo_name"] :?> string
                     RepoUrl = reader.["repo_url"] :?> string
                     LastPullAttempt = lastPullAttempt
+                    LastSuccessfulPull = lastSuccessfulPull
                 }
                 repos <- repo :: repos
             

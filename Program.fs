@@ -395,8 +395,8 @@ let main () =
             printfn "Example:"
             printfn "  $env:GITHUB_TOKEN=\"your_token_here\""
 
-        // Perform git pull operations if requested
-        GitOperations.performGitPulls repoInfos
+        // Perform git pull operations if requested (using parallel processing)
+        GitOperations.performParallelGitPulls repoInfos
 
         // Perform file indexing if requested
         FileIndexingOperations.performFileIndexing repoInfos
