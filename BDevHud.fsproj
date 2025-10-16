@@ -7,6 +7,11 @@
 
   <ItemGroup>
     <Compile Include="HudCache.fs" />
+    <Compile Include="GitRepoInfo.fs" />
+    <Compile Include="CommandLineArgs.fs" />
+    <Compile Include="SearchOperations.fs" />
+    <Compile Include="FileIndexingOperations.fs" />
+    <Compile Include="GitOperations.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

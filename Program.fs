@@ -1,4 +1,4 @@
-﻿open System
+open System
 open System.IO
 open System.Web
 open System.Text
@@ -9,517 +9,122 @@ open GitHub.Adapter
 open SqlLite.Adapter
 open BDevHud
 
-/// Represents git repository information
-type GitRepoInfo = {
-    Path: string
-    RemoteUrl: string option
-    RepoName: string
-}
-
-// =============================================================================
-// COMMAND LINE ARGUMENT PARSING MODULE
-// =============================================================================
-
-module CommandLineArgs =
-    /// Get command line arguments
-    let private getArgs () = Environment.GetCommandLineArgs()
-    
-    /// Check if debug logging should be enabled
-    let shouldDebugLog () =
-        let args = getArgs ()
-        args |> Array.contains "--debug" || args |> Array.contains "-d"
-
-    /// Check if git pull operations should be performed
-    let shouldPullRepos () =
-        let args = getArgs ()
-        args |> Array.contains "--pull-repos" || args |> Array.contains "--pull"
-
-    /// Check if file indexing should be performed
-    let shouldIndexFiles () =
-        let args = getArgs ()
-        args |> Array.contains "--index-files" || args |> Array.contains "--index"
-
-    /// Get search term from command line args
-    let getSearchTerm () =
-        let args = getArgs ()
-        // Look for --search=term pattern
-        args
-        |> Array.tryFind (fun arg -> arg.StartsWith("--search="))
-        |> Option.map (fun arg -> arg.Substring(9)) // Remove "--search=" prefix
-
-    /// Get root directory from command line args or environment variable
-    let getRootDirectory () =
-        let args = getArgs ()
-        // Check for command line argument (skip the first arg which is the program name)
-        // Look for positional arguments that aren't Octopus-related
-        let positionalArgs =
-            args
-            |> Array.skip 1
-            |> Array.filter (fun arg ->
-                not (arg.StartsWith("--") || arg.StartsWith("-"))
-                && not (arg.StartsWith("http")) // Filter out URLs
-                && not (arg.StartsWith("API-"))) // Filter out API keys
-
-        if positionalArgs.Length > 0 then
-            let rootPath = positionalArgs.[0]
-            printfn $"Using command line root directory: {rootPath}"
-            Some rootPath
-        else
-            // Check for DEVROOT environment variable first
-            let devRoot = Environment.GetEnvironmentVariable("DEVROOT")
-            if not (String.IsNullOrEmpty(devRoot)) then
-                printfn $"Using DEVROOT environment variable: {devRoot}"
-                Some devRoot
-            else
-                // Check for DEVDIR environment variable as fallback
-                let devDir = Environment.GetEnvironmentVariable("DEVDIR")
-                if not (String.IsNullOrEmpty(devDir)) then
-                    printfn $"Using DEVDIR environment variable: {devDir}"
-                    Some devDir
-                else
-                    printfn "No root directory specified. Searching all local drives."
-                    None
-
-// =============================================================================
-// GIT/IO ADAPTER FUNCTIONS MODULE
-// =============================================================================
-
-module GitOperations =
-    /// Extract repository name from a git URL (wrapper for GitAdapter function)
-    let extractRepoName (url: string) : string =
-        try
-            let decodedUrl = HttpUtility.UrlDecode(url)
-            let uri = Uri(decodedUrl)
-            let segments = uri.Segments
-
-            if segments.Length > 0 then
-                let lastSegment = segments.[segments.Length - 1]
-                if lastSegment.EndsWith(".git") then
-                    lastSegment.Substring(0, lastSegment.Length - 4)
-                else
-                    lastSegment
-            else
-                "unknown"
-        with _ ->
-            "unknown"
-
-    /// Spider-search for .git folders under a root directory
-    /// If no root directory is provided, searches all local drives
-    let findGitFolders (rootDirectory: string option) (debugMode: bool) =
-        /// Processes a directory to find .git folders
-        let processDirectoryForGit (dir: string) =
-            try
-                let gitPath = Path.Combine(dir, ".git")
-                if Directory.Exists(gitPath) then
-                    printfn $"Found .git folder: {dir}"
-                    [ gitPath ]
-                else
-                    []
-            with _ ->
-                [] // Ignore errors when checking for .git in current directory
-
-        /// Combines results from different directories
-        let combineResults (existing: string list) (newResults: string list) = existing @ newResults
-
-        match rootDirectory with
-        | Some root ->
-            if Directory.Exists(root) then
-                printfn $"Searching for .git folders under: {root}"
-                DirectoryTraversal.traverseDirectories root processDirectoryForGit [] combineResults debugMode
-                |> List.toArray
-            else
-                printfn $"Directory does not exist: {root}"
-                [||]
-        | None ->
-            printfn "Searching all local drives for .git folders..."
-            DirectoryTraversal.traverseAllLocalDrives processDirectoryForGit [] combineResults debugMode
-            |> List.toArray
-
-    /// Get git repositories from cache for Octopus matching
-    let getGitReposFromCache () : (string * string) list =
-        let cachedRepos = GitCache.getAllCachedRepos ()
-        cachedRepos |> List.map (fun repo -> (repo.RepoName, repo.RepoUrl))
-
-    /// Display results of git folder search with remote information (no git pull by default)
-    let displayGitFolders (gitFolders: string[]) : GitRepoInfo list =
-        if gitFolders.Length = 0 then
-            printfn "No .git folders found."
-            []
-        else
-            printfn "\nFound %d .git folder(s):" gitFolders.Length
-
-            let mutable repoInfos = []
-
-            gitFolders
-            |> Array.iteri (fun i folder ->
-                let parentDir = Directory.GetParent(folder).FullName
-                printfn "%d. %s" (i + 1) parentDir
-
-                // Get and display remote information
-                let remoteResult = GitAdapter.getRemote parentDir
-
-                if remoteResult.Success && remoteResult.Remotes.Length > 0 then
-                    // Group remotes by name and URL to collapse fetch/push into single lines
-                    let groupedRemotes =
-                        remoteResult.Remotes
-                        |> List.groupBy (fun remote -> (remote.Name, remote.Url))
-                        |> List.map (fun ((name, url), remotes) ->
-                            let types = remotes |> List.map (fun r -> r.Type) |> List.distinct |> List.sort
-
-                            let operationType =
-                                match types with
-                                | [ "fetch"; "push" ] -> "both"
-                                | [ "fetch" ] -> "pull"
-                                | [ "push" ] -> "push"
-                                | _ -> String.concat ", " types
-
-                            (name, url, operationType))
-
-                    groupedRemotes
-                    |> List.iter (fun (name, url, operationType) ->
-                        let decodedUrl = HttpUtility.UrlDecode(url)
-                        printfn $"    {name}      {decodedUrl} ({operationType})")
-
-                    // Store repository information (no git pull by default)
-                    let primaryRemote = groupedRemotes |> List.head
-                    let (_, url, _) = primaryRemote
-                    let repoName = extractRepoName url
-                    let repoUrl = HttpUtility.UrlDecode(url)
-
-                    // Add to repo info list
-                    let repoInfo = {
-                        Path = parentDir
-                        RemoteUrl = Some repoUrl
-                        RepoName = repoName
-                    }
-                    repoInfos <- repoInfo :: repoInfos
-
-                    // Update SQLite cache with repository information (preserve existing pull attempt date)
-                    let existingCache = GitCache.getCachedRepo parentDir
-                    let cacheEntry = {
-                        Path = parentDir
-                        RepoName = repoName
-                        RepoUrl = repoUrl
-                        LastPullAttempt = 
-                            match existingCache with
-                            | Some existing -> existing.LastPullAttempt
-                            | None -> None
-                    }
-                    GitCache.upsertRepo cacheEntry
-                else
-                    printfn "    (no remote configured)"
-                    // Add to repo info list even without remote
-                    let repoInfo = {
-                        Path = parentDir
-                        RemoteUrl = None
-                        RepoName = Path.GetFileName(parentDir)
-                    }
-                    repoInfos <- repoInfo :: repoInfos)
-
-            // Return collected repository information
-            List.rev repoInfos
-
-    /// Perform git pull operations on repositories if requested
-    let performGitPulls (repoInfos: GitRepoInfo list) =
-        if CommandLineArgs.shouldPullRepos() then
-            printfn "\n%s" (String.replicate 50 "=")
-            printfn "Git Pull Operations"
-            printfn "%s" (String.replicate 50 "=")
-            printfn $"Checking {repoInfos.Length} repositories for pull eligibility..."
-
-            let mutable pullCount = 0
-            let mutable skippedCount = 0
-
-            repoInfos
-            |> List.iteri (fun i repoInfo ->
-                match repoInfo.RemoteUrl with
-                | Some url ->
-                    // Check cache to see if we should attempt pull (30-minute cooldown)
-                    let cachedRepo = GitCache.getCachedRepo repoInfo.Path
-                    let shouldPull = 
-                        match cachedRepo with
-                        | Some cached -> GitCache.shouldAttemptPull cached.LastPullAttempt
-                        | None -> true // No cache entry, should attempt
-
-                    if shouldPull then
-                        printfn "\n[%d/%d] Pulling: %s" (i + 1) repoInfos.Length repoInfo.RepoName
-                        printfn "    Path: %s" repoInfo.Path
-
-                        // Update cache with attempt timestamp BEFORE trying pull
-                        let cacheEntry = {
-                            Path = repoInfo.Path
-                            RepoName = repoInfo.RepoName
-                            RepoUrl = url
-                            LastPullAttempt = Some DateTime.UtcNow
-                        }
-                        GitCache.upsertRepo cacheEntry
-
-                        // Run git pull for this repository
-                        let (pullSuccess, pullError) = GitAdapter.gitPull repoInfo.Path
-
-                        if pullSuccess then
-                            printfn "    ✅ Pull successful"
-                            pullCount <- pullCount + 1
-                        else
-                            printfn "    ❌ Pull failed: %s" pullError
-                            pullCount <- pullCount + 1 // Still count as attempted
-                    else
-                        let timeSinceLastAttempt = 
-                            match cachedRepo with
-                            | Some cached ->
-                                match cached.LastPullAttempt with
-                                | Some lastAttempt ->
-                                    let elapsed = DateTime.UtcNow - lastAttempt
-                                    sprintf "%.1f minutes ago" elapsed.TotalMinutes
-                                | None -> "never"
-                            | None -> "never"
-                        
-                        printfn "[%d/%d] Skipping %s (last attempt: %s)" (i + 1) repoInfos.Length repoInfo.RepoName timeSinceLastAttempt
-                        skippedCount <- skippedCount + 1
-                | None ->
-                    printfn "[%d/%d] Skipping %s (no remote URL)" (i + 1) repoInfos.Length repoInfo.RepoName)
-
-            printfn "\nGit pull operations completed: %d attempted, %d skipped (30-minute cooldown)" pullCount skippedCount
-        else
-            printfn "\n💡 Use --pull-repos flag to perform git pull operations on all repositories"
-
-// =============================================================================
-// SQLITE ADAPTER FUNCTIONS MODULE
-// =============================================================================
-
-module FileIndexingOperations =
-    /// Repository blacklist - repositories to skip during indexing
-    let private repositoryBlacklist = [
-        "archivedOG"
-        "SBS.Archived.og-src"
-    ]
-
-    /// Check if a repository should be skipped based on blacklist
-    let private shouldSkipRepository (repoName: string) =
-        repositoryBlacklist 
-        |> List.exists (fun blacklisted -> 
-            repoName.Contains(blacklisted, System.StringComparison.OrdinalIgnoreCase))
-
-    /// Perform file indexing on repositories if requested
-    let performFileIndexing (repoInfos: GitRepoInfo list) =
-        if CommandLineArgs.shouldIndexFiles() then
-            printfn "\n%s" (String.replicate 50 "=")
-            printfn "File Indexing Operations"
-            printfn "%s" (String.replicate 50 "=")
-            printfn "Indexing Terraform and PowerShell files in %d repositories..." repoInfos.Length
-            printfn $"""Repository blacklist: {String.concat ", " repositoryBlacklist}"""
-
-            let mutable totalFilesIndexed = 0
-            let mutable skippedRepos = 0
-
-            repoInfos
-            |> List.iteri (fun i repoInfo ->
-                if shouldSkipRepository repoInfo.RepoName then
-                    printfn "\n[%d/%d] ⚠️ Skipping blacklisted repository: %s" (i + 1) repoInfos.Length repoInfo.RepoName
-                    skippedRepos <- skippedRepos + 1
-                else
-                    printfn "\n[%d/%d] Indexing repository: %s" (i + 1) repoInfos.Length repoInfo.RepoName
-                    printfn "    Path: %s" repoInfo.Path
-
-                    try
-                        // Get indexable files (terraform and powershell)
-                        let indexableFiles = FileIndex.getIndexableFiles repoInfo.Path
-                        printfn "    Found %d indexable files" indexableFiles.Length
-
-                        if indexableFiles.Length > 0 then
-                            // Index each file with detailed logging
-                            let mutable fileIndex = 0
-                            for (filePath, fileType) in indexableFiles do
-                                fileIndex <- fileIndex + 1
-                                let fileName = System.IO.Path.GetFileName(filePath)
-                                let fileInfo = System.IO.FileInfo(filePath)
-                                let fileSizeKB = fileInfo.Length / 1024L
-                                printfn "    [%d/%d] Starting file: %s (%s, %d KB)" fileIndex indexableFiles.Length fileName fileType fileSizeKB
-                                
-                            // Index the repository
-                            FileIndex.indexRepository repoInfo.Path
-                            totalFilesIndexed <- totalFilesIndexed + indexableFiles.Length
-                            printfn "    ✅ Indexed %d files" indexableFiles.Length
-                        else
-                            printfn "    ⚠️ No Terraform or PowerShell files found"
-                    with
-                    | ex ->
-                        printfn "    ❌ Error indexing repository: %s" ex.Message)
-
-            printfn "\nFile indexing completed: %d total files indexed across %d repositories" totalFilesIndexed (repoInfos.Length - skippedRepos)
-            printfn "Repositories processed: %d, skipped: %d" (repoInfos.Length - skippedRepos) skippedRepos
-        else
-            printfn "\n💡 Use --index-files flag to index Terraform and PowerShell files for search"
-
-    /// Perform text search using trigram matching if requested
-    let performTextSearch () =
-        match CommandLineArgs.getSearchTerm() with
-        | Some searchTerm ->
-            printfn "\n%s" (String.replicate 50 "=")
-            printfn "Trigram Text Search"
-            printfn "%s" (String.replicate 50 "=")
-            printfn "Searching for: '%s'" searchTerm
-            
-            // Check if we have indexed data
-            if FileIndex.hasIndexedData() then
-                let (fileCount, trigramCount, repos) = FileIndex.getIndexStats()
-                printfn "Searching %d indexed files with %d trigrams across %d repositories..." fileCount trigramCount repos.Length
-                
-                let results = FileIndex.searchText searchTerm
-                
-                if results.Length > 0 then
-                    printfn "\nFound %d matching file(s):" results.Length
-                    
-                    results
-                    |> List.iteri (fun i file ->
-                        printfn "\n[%d] %s file:" (i + 1) (file.FileType.ToUpper())
-                        printfn "    Repository: %s" (Path.GetFileName(file.RepoPath))
-                        printfn "    File: %s" (Path.GetFileName(file.FilePath))
-                        printfn "    Full path: %s" file.FilePath
-                        printfn "    Size: %d bytes" file.FileSize)
-                else
-                    printfn "\nNo files found containing '%s'" searchTerm
-            else
-                printfn "\nNo indexed data found."
-                printfn "💡 Use --index-files flag to index Terraform and PowerShell files first"
-        | None ->
-            () // No search requested
-
-    /// Check if we should skip git operations when only searching
-    let shouldSkipGitOperations () =
-        let searchTerm = CommandLineArgs.getSearchTerm()
-        let hasIndexData = searchTerm.IsSome && FileIndex.hasIndexedData()
-        let noOtherOperations = 
-            not (CommandLineArgs.shouldIndexFiles()) && 
-            not (CommandLineArgs.shouldPullRepos())
-        
-        hasIndexData && noOtherOperations
-
 // =============================================================================
 // OCTOPUS ADAPTER FUNCTIONS MODULE  
 // =============================================================================
 
 module OctopusOperations =
-    /// Format API key for display (show first 8 chars like Octopus UI, but ensure security)
-    let formatApiKeyForDisplay (apiKey: string) =
-        if isNull apiKey then
-            "[NULL]"
-        elif String.IsNullOrWhiteSpace(apiKey) then
-            "[EMPTY OR WHITESPACE]"
-        elif apiKey.Length > 10 then
-            // Show first 8 chars, mask the rest (ensuring at least 3 chars are hidden)
-            let visible = apiKey.Substring(0, 8)
-            let masked = String.replicate (apiKey.Length - 8) "*"
-            $"{visible}{masked} (length {apiKey.Length})"
-        else
-            // For short keys, don't show any characters for security
-            $"[REDACTED - length {apiKey.Length}]"
-
     /// Get Octopus URL from command line args or environment variable
     let getOctopusUrl () =
         let args = Environment.GetCommandLineArgs()
-        // Check for command line argument (look for --octopus-url or -o)
-        let octopusArgIndex =
-            args |> Array.tryFindIndex (fun arg -> arg = "--octopus-url" || arg = "-o")
-
-        match octopusArgIndex with
-        | Some index when index + 1 < args.Length ->
-            let octopusUrl = args.[index + 1]
-            printfn $"Using command line Octopus URL: {octopusUrl}"
-            Some octopusUrl
-        | _ ->
-            // Check for OCTOPUS_URL environment variable
-            let octopusUrl = Environment.GetEnvironmentVariable("OCTOPUS_URL")
-            if not (String.IsNullOrEmpty(octopusUrl)) then
-                printfn $"Using OCTOPUS_URL environment variable: {octopusUrl}"
-                Some octopusUrl
+        
+        // Check for command line argument first
+        let octopusUrlArg =
+            args
+            |> Array.tryFind (fun arg -> arg.StartsWith("--octopus-url="))
+            |> Option.map (fun arg -> arg.Substring(14)) // Remove "--octopus-url=" prefix
+        
+        match octopusUrlArg with
+        | Some url ->
+            printfn "Using command line Octopus URL: %s" url
+            Some url
+        | None ->
+            // Check environment variable
+            let envUrl = Environment.GetEnvironmentVariable("OCTOPUS_URL")
+            if not (String.IsNullOrEmpty(envUrl)) then
+                printfn "Using OCTOPUS_URL environment variable: %s" envUrl
+                Some envUrl
             else
                 None
+
+    // Format API key for display (hide most characters)
+    let formatApiKeyForDisplay (apiKey: string) : string =
+        if apiKey.Length <= 8 then
+            "****"
+        else
+            let prefix = apiKey.Substring(0, 4)
+            let suffix = apiKey.Substring(apiKey.Length - 4)
+            sprintf "%s****%s" prefix suffix
 
     /// Get Octopus API key from command line args or environment variable
     let getOctopusApiKey () =
         let args = Environment.GetCommandLineArgs()
-        // Check for command line argument (look for --octopus-api-key or --api-key)
-        let apiKeyArgIndex =
-            args |> Array.tryFindIndex (fun arg -> arg = "--octopus-api-key" || arg = "--api-key")
-
-        match apiKeyArgIndex with
-        | Some index when index + 1 < args.Length ->
-            let apiKey = args.[index + 1]
-            printfn $"Using command line Octopus API key: {formatApiKeyForDisplay apiKey}"
+        
+        // Check for command line argument first
+        let octopusApiKeyArg =
+            args
+            |> Array.tryFind (fun arg -> arg.StartsWith("--octopus-api-key="))
+            |> Option.map (fun arg -> arg.Substring(18)) // Remove "--octopus-api-key=" prefix
+        
+        match octopusApiKeyArg with
+        | Some apiKey ->
+            printfn "Using command line Octopus API key: %s" (formatApiKeyForDisplay apiKey)
             Some apiKey
-        | _ ->
-            // Check for OCTO_API_KEY environment variable
-            let apiKey = Environment.GetEnvironmentVariable("OCTO_API_KEY")
-            if not (String.IsNullOrEmpty(apiKey)) then
-                printfn $"Using OCTO_API_KEY environment variable: {formatApiKeyForDisplay apiKey}"
-                Some apiKey
+        | None ->
+            // Check environment variable
+            let envApiKey = Environment.GetEnvironmentVariable("OCTO_API_KEY")
+            if not (String.IsNullOrEmpty(envApiKey)) then
+                printfn "Using OCTO_API_KEY environment variable: %s" (formatApiKeyForDisplay envApiKey)
+                Some envApiKey
             else
                 None
 
-    /// Check for skip deployment steps flag from command line args
-    let getSkipDeploymentSteps () =
-        let args = Environment.GetCommandLineArgs()
-        args |> Array.contains "--skip-deployment-steps"
-
-    /// Get Octopus variable search pattern from command line
+    /// Get variable search pattern from command line args
     let getVariableSearchPattern () =
         let args = Environment.GetCommandLineArgs()
-        // Check for command line argument (look for --search-variable)
-        let searchVarArgIndex =
-            args |> Array.tryFindIndex (fun arg -> arg = "--search-variable" || arg = "--search-var")
-
-        match searchVarArgIndex with
-        | Some index when index + 1 < args.Length ->
-            let pattern = args.[index + 1]
-            printfn $"Searching for variables matching: {pattern}"
+        
+        // Look for --search-variable pattern
+        let searchVariableArg =
+            args
+            |> Array.tryFind (fun arg -> arg.StartsWith("--search-variable="))
+            |> Option.map (fun arg -> arg.Substring(18)) // Remove "--search-variable=" prefix
+        
+        match searchVariableArg with
+        | Some pattern ->
+            printfn "Searching for variables matching: %s" pattern
             Some pattern
-        | _ -> None
+        | None -> None
 
-    /// Get project step analysis parameter from command line (format: projectName/stepNumber)
+    /// Get project and step for deployment step analysis
     let getProjectStepAnalysis () =
         let args = Environment.GetCommandLineArgs()
-        // Check for command line argument (look for --analyze-step)
-        let analyzeStepArgIndex =
-            args |> Array.tryFindIndex (fun arg -> arg = "--analyze-step" || arg = "--step-analysis")
-
-        match analyzeStepArgIndex with
-        | Some index when index + 1 < args.Length ->
-            let stepSpec = args.[index + 1]
-            printfn $"Analyzing deployment step: {stepSpec}"
-            
-            // Parse projectName/stepIdentifier format (stepIdentifier can be number or decimal like 10.1)
-            let parts = stepSpec.Split('/')
-            if parts.Length = 2 && not (String.IsNullOrWhiteSpace(parts.[0])) && not (String.IsNullOrWhiteSpace(parts.[1])) then
-                Some (parts.[0].Trim(), parts.[1].Trim())
+        
+        // Look for --analyze-step pattern
+        let analyzeStepArg =
+            args
+            |> Array.tryFind (fun arg -> arg.StartsWith("--analyze-step="))
+            |> Option.map (fun arg -> arg.Substring(15)) // Remove "--analyze-step=" prefix
+        
+        match analyzeStepArg with
+        | Some stepSpec ->
+            printfn "Analyzing deployment step: %s" stepSpec
+            // Parse format: projectName/stepIdentifier
+            if stepSpec.Contains("/") then
+                let parts = stepSpec.Split('/')
+                if parts.Length = 2 then
+                    Some (parts.[0], parts.[1])
+                else
+                    printfn "❌ Invalid format. Expected: projectName/stepIdentifier (e.g., 'MyProject/1' or 'MyProject/10.1')"
+                    None
             else
-                printfn $"❌ Invalid format. Expected: projectName/stepIdentifier (e.g., 'MyProject/1' or 'MyProject/10.1')"
+                printfn "❌ Invalid format. Expected: projectName/stepIdentifier (e.g., 'MyProject/1' or 'MyProject/10.1')"
                 None
-        | _ -> None
+        | None -> None
 
-    /// Extract GitHub URLs from project descriptions
-    let extractGitHubUrls (description: string) =
-        if String.IsNullOrEmpty(description) then []
-        else
-            let githubPattern = @"https://github\.com/[^\s<>)]+[^\s<>).,]"
-            let regex = System.Text.RegularExpressions.Regex(githubPattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-            regex.Matches(description)
-            |> Seq.cast<System.Text.RegularExpressions.Match>
-            |> Seq.map (fun m -> m.Value)
-            |> List.ofSeq
-
-    /// Match GitHub URLs with cached git repositories
-    let matchGitHubUrlsWithRepos (githubUrls: string list) (gitRepos: (string * string) list) =
-        githubUrls
-        |> List.choose (fun githubUrl ->
-            gitRepos 
-            |> List.tryFind (fun (_, repoUrl) -> 
-                // Normalize URLs for comparison (remove .git, trailing slashes, etc.)
-                let normalizeUrl (url: string) = 
-                    url.TrimEnd('/').Replace(".git", "").ToLower()
-                normalizeUrl repoUrl = normalizeUrl githubUrl ||
-                repoUrl.Contains(githubUrl.Replace("https://github.com/", ""), System.StringComparison.OrdinalIgnoreCase))
-            |> Option.map (fun (repoName, repoUrl) -> (githubUrl, repoName, repoUrl)))
+    /// Finds GitHub repositories that match local git repositories
+    let findMatchingGitHubRepos (octopusProjects: OctopusClient.OctopusProjectWithGit list) (localGitRepos: (string * string) list) =
+        octopusProjects
+        |> List.collect (fun project ->
+            match project.GitRepoUrl with
+            | Some gitUrl when gitUrl.Contains("github.com") ->
+                // Find local repos that match this GitHub URL
+                localGitRepos
+                |> List.choose (fun (repoName, repoUrl) ->
+                    if repoUrl.Contains(gitUrl.Replace("https://github.com/", ""), System.StringComparison.OrdinalIgnoreCase) then
+                        Some (gitUrl, repoName, repoUrl)
+                    else
+                        None)
+            | _ -> [])
 
     /// Display Octopus projects with git repository information
     let displayOctopusProjects (projects: OctopusClient.OctopusProjectWithGit list) =
@@ -530,7 +135,7 @@ module OctopusOperations =
 
             projects
             |> List.iteri (fun i project ->
-                printfn "%d. %s" (i + 1) project.ProjectName
+                printfn "%d. %s" (i + 1) project.Name
                 printfn "    Octopus URL: %s" project.OctopusUrl
 
                 match project.GitRepoUrl with
@@ -559,20 +164,20 @@ let main () =
     printfn "======================="
 
     // Check if we can skip git operations for search-only mode
-    let skipGitOps = FileIndexingOperations.shouldSkipGitOperations()
+    let skipGitOps = CommandLineArgs.shouldSkipGitOperations()
     
-    let repoInfos = 
-        if skipGitOps then
-            printfn "Search-only mode: Skipping git repository discovery"
-            []
-        else
-            let rootDirectory = CommandLineArgs.getRootDirectory ()
-            let debugMode = CommandLineArgs.shouldDebugLog ()
-            let gitFolders = GitOperations.findGitFolders rootDirectory debugMode
-            GitOperations.displayGitFolders gitFolders
+    if skipGitOps then
+        printfn "Search-only mode: Skipping git repository discovery"
+    else
+        // Get root directory and debug mode
+        let rootDirectory = CommandLineArgs.getRootDirectory()
+        let debugMode = CommandLineArgs.shouldDebugLog()
 
-    // Check for Octopus URL and API key, then display Octopus projects (skip if search-only mode)
-    if not skipGitOps then
+        // Find git folders and display them
+        let gitFolders = GitOperations.findGitFolders rootDirectory debugMode
+        let repoInfos = GitOperations.displayGitFolders gitFolders
+
+        // Check for Octopus URL and API key, then display Octopus projects (skip if search-only mode)
         let octopusUrl = OctopusOperations.getOctopusUrl ()
         let octopusApiKey = OctopusOperations.getOctopusApiKey ()
 
@@ -583,322 +188,135 @@ let main () =
             printfn "%s" (String.replicate 50 "=")
 
             try
-            // Parse the URL to extract base server URL and space ID
-            let (baseUrl, spaceId) = 
-                try
-                    let uri = Uri(url)
-                    let portPart = if uri.Port <> -1 then $":{uri.Port}" else ""
-                    
-                    // Preserve the path part (like /api) but remove fragment
-                    let pathPart = 
-                        if String.IsNullOrEmpty(uri.AbsolutePath) || uri.AbsolutePath = "/" then 
-                            ""
-                        else 
-                            uri.AbsolutePath.TrimEnd('/')
-                    
-                    let baseServerUrl = $"{uri.Scheme}://{uri.Host}{portPart}{pathPart}"
-                    
-                    // Check if URL contains space identifier in fragment
-                    let extractedSpaceId = 
-                        if not (String.IsNullOrEmpty(uri.Fragment)) then
-                            let fragment = uri.Fragment.TrimStart('#')
-                            if fragment.Contains("/Spaces-") then
-                                let spacePart = fragment.Split([|"/Spaces-"|], StringSplitOptions.RemoveEmptyEntries)
-                                if spacePart.Length > 1 then
-                                    Some ("Spaces-" + spacePart.[1].Split('/').[0])
-                                else None
-                            elif fragment.StartsWith("Spaces-") then
-                                Some (fragment.Split('/').[0])
-                            else None
-                        else None
-                    
-                    let spaceDisplay = extractedSpaceId |> Option.defaultValue "(default space)"
-                    printfn $"🔍 Parsed URL:"
-                    printfn $"    Base Server URL: {baseServerUrl}"
-                    printfn $"    Extracted Space ID: {spaceDisplay}"
-                    
-                    (baseServerUrl, extractedSpaceId)
-                with 
-                | ex -> 
-                    printfn $"⚠️  URL parsing warning: {ex.Message}"
-                    printfn $"    Using URL as-is: {url}"
-                    (url, None)
-
-            let spaceType = 
-                match spaceId with 
-                | Some id -> Some (Octo.Adapter.SpaceId id)
-                | None -> None
-
-            let config = 
-                { ServerUrl = baseUrl
-                  ApiKey = apiKey
-                  Space = spaceType }
-
-            let targetSpace = spaceId |> Option.defaultValue "Default"
-            printfn $"🔗 Connecting to Octopus Deploy..."
-            printfn $"    Server: {baseUrl}"
-            printfn $"    API Key: {OctopusOperations.formatApiKeyForDisplay apiKey}"
-            printfn $"    Target Space: {targetSpace}"
-            
-            // First, test connectivity with a proper connection test
-            printfn $"🔍 Testing connection to Octopus server..."
-            let connectionResult = OctopusClient.testConnection config |> Async.AwaitTask |> Async.RunSynchronously
-            
-            match connectionResult with
-            | Ok serverInfo ->
-                printfn $"✅ Connection successful! {serverInfo}"
-                
-                // Now get spaces
-                printfn $"🔍 Listing available spaces..."
-                printfn $"    Making API call to: {baseUrl}/api/spaces"
-                let spaces = OctopusClient.getSpaces config |> Async.AwaitTask |> Async.RunSynchronously
-                printfn $"📋 Found {spaces.Length} space(s):"
-                spaces |> List.iteri (fun i space -> 
-                    printfn $"    {i + 1}. {space.Name} (ID: {space.Id})")
-                
-                // If no spaces found but connection worked, might need to use default space
-                if spaces.Length = 0 then
-                    printfn $"⚠️  No spaces returned - this might indicate:"
-                    printfn $"    - Using an older Octopus version without spaces"
-                    printfn $"    - API key lacks permission to list spaces"
-                    printfn $"    - Need to query default space directly"
-            | Error errorMsg ->
-                printfn $"❌ Connection failed: {errorMsg}"
-                printfn $"💡 This confirms you need to be on the VPN or check network connectivity"
-                raise (System.Exception($"Connection test failed: {errorMsg}"))
-            
-            // Get all projects from the specified space (or default)
-            printfn $"🔍 Querying projects..."
-            let projectApiUrl = 
-                match spaceId with
-                | Some space -> $"{baseUrl}/api/{space}/projects"
-                | None -> $"{baseUrl}/api/projects"
-            printfn $"    Making API call to: {projectApiUrl}"
-            let projects = OctopusClient.getAllProjects config |> Async.AwaitTask |> Async.RunSynchronously
-            
-            printfn $"📋 Found {projects.Length} Octopus project(s):"
-            if projects.Length = 0 then
-                printfn $"    No projects found in the target space."
-                if spaceId.IsSome then
-                    printfn $"    💡 Try using just the base URL without space ID for default space"
-                else
-                    printfn $"    💡 This might be an older Octopus version or permission issue"
-            else
-                let gitRepos = GitOperations.getGitReposFromCache ()
-                
-                projects |> List.iteri (fun i project ->
-                    // Check if this is a NextGen project first
-                    let isNextGen = project.Name.Contains("NextGen", System.StringComparison.OrdinalIgnoreCase)
-                    
-                    if isNextGen then
-                        // Full details for NextGen projects
-                        let description = if String.IsNullOrEmpty(project.Description) then "(no description)" else project.Description
-                        printfn $"{i + 1}. {project.Name} ⭐ NEXTGEN PROJECT"
-                        printfn $"    ID: {project.Id}"
-                        printfn $"    Space: {project.SpaceName}"
-                        printfn $"    Description: {description}"
-                        printfn $"    Disabled: {project.IsDisabled}"
+                // Parse the URL to extract base server URL and space ID
+                let (baseUrl, spaceId) = 
+                    try
+                        let uri = Uri(url)
+                        let portPart = if uri.Port <> -1 then sprintf ":%d" uri.Port else ""
                         
-                        // Extract and match GitHub URLs from project description
-                        if not (String.IsNullOrEmpty(project.Description)) then
-                            let githubUrls = OctopusOperations.extractGitHubUrls project.Description
-                            if not githubUrls.IsEmpty then
-                                let matches = OctopusOperations.matchGitHubUrlsWithRepos githubUrls gitRepos
-                                if not matches.IsEmpty then
-                                    printfn $"    🔗 GitHub Repositories:"
-                                    matches |> List.iter (fun (githubUrl, repoName, localRepoUrl) ->
-                                        printfn $"        📁 {repoName}: {githubUrl}"
-                                        printfn $"           Local: {localRepoUrl}")
-                                else
-                                    printfn $"    🔗 GitHub URLs found (no local matches):"
-                                    githubUrls |> List.iter (fun url -> printfn $"        {url}")
+                        // Preserve the path part (like /api) but remove fragment
+                        let pathPart = 
+                            if String.IsNullOrEmpty(uri.AbsolutePath) || uri.AbsolutePath = "/" then 
+                                ""
+                            else 
+                                uri.AbsolutePath.TrimEnd('/')
                         
-                        // Show deployment process steps for NextGen projects (if not skipped)
-                        let skipSteps = OctopusOperations.getSkipDeploymentSteps()
-                        if skipSteps then
-                            printfn $"    🚀 NextGen Project - Deployment step analysis skipped (--skip-deployment-steps)"
-                        else
-                            printfn $"    🚀 NextGen Project - Fetching deployment steps..."
-                            try
-                                let stepsResult = OctopusClient.getProjectDeploymentProcess config project.Name |> Async.AwaitTask |> Async.RunSynchronously
-                                match stepsResult with
-                                | Ok steps when steps.Length > 0 ->
-                                    printfn $"    📋 Deployment Steps ({steps.Length}):"
-                                    steps |> List.take (min 5 steps.Length) |> List.iter (fun step ->
-                                        printfn $"        {step.StepNumber}. {step.Name} ({step.ActionType})")
-                                    if steps.Length > 5 then
-                                        printfn $"        ... and {steps.Length - 5} more steps"
-                                | Ok _ ->
-                                    printfn $"    📋 No deployment steps found"
-                                | Error err when err.Contains("Resource is not found") ->
-                                    printfn $"    ❌ Deployment steps access denied: {err}"
-                                    printfn $"    💡 API key may lack 'DeploymentView' or 'ProcessView' permissions"
-                                    printfn $"    💡 Contact your Octopus administrator to grant deployment process access"
-                                    printfn $"    💡 You can use --skip-deployment-steps to disable this feature"
-                                | Error err ->
-                                    printfn $"    ❌ Error fetching steps: {err}"
-                            with
-                            | ex -> 
-                                printfn $"    ❌ Exception fetching steps: {ex.Message}"
-                                if ex.Message.Contains("Resource is not found") then
-                                    printfn $"    💡 This is likely a permissions issue with your API key"
-                                    printfn $"    💡 You can use --skip-deployment-steps to disable this feature"
+                        let baseServerUrl = sprintf "%s://%s%s%s" uri.Scheme uri.Host portPart pathPart
                         
-                        printfn ""
+                        // Check if URL contains space identifier in fragment
+                        let spaceIdFromFragment = 
+                            if not (String.IsNullOrEmpty(uri.Fragment)) && uri.Fragment.Contains("Spaces-") then
+                                let fragment = uri.Fragment.TrimStart('#')
+                                let spacePart = fragment.Split('/') |> Array.tryFind (fun part -> part.StartsWith("Spaces-"))
+                                spacePart
+                            else
+                                None
+                        
+                        let spaceDisplay = spaceIdFromFragment |> Option.defaultValue "Default"
+                        
+                        printfn "🔍 Parsed URL:"
+                        printfn "    Base Server URL: %s" baseServerUrl
+                        printfn "    Extracted Space ID: %s" spaceDisplay
+                        
+                        (baseServerUrl, spaceIdFromFragment)
+                    with ex ->
+                        printfn "⚠️  URL parsing warning: %s" ex.Message
+                        printfn "    Using URL as-is: %s" url
+                        (url, None)
+
+                // Create Octopus client configuration
+                let space = spaceId |> Option.map SpaceId
+                let config = {
+                    ServerUrl = baseUrl
+                    ApiKey = apiKey
+                    Space = space
+                }
+
+                // Test connection and get server info
+                printfn "🔗 Connecting to Octopus Deploy..."
+                printfn "    Server: %s" baseUrl
+                printfn "    API Key: %s" (OctopusOperations.formatApiKeyForDisplay apiKey)
+                printfn "    Target Space: %s" (spaceId |> Option.defaultValue "Default")
+
+                printfn "🔍 Testing connection to Octopus server..."
+                let serverInfoResult = OctopusClient.testConnection config |> Async.AwaitTask |> Async.RunSynchronously
+                match serverInfoResult with
+                | Ok serverInfo ->
+                    printfn "✅ Connection successful! %s" serverInfo
+                    
+                    printfn "🔍 Listing available spaces..."
+                    printfn "    Making API call to: %s/api/spaces" baseUrl
+                    let spacesResult = OctopusClient.getSpaces config |> Async.AwaitTask |> Async.RunSynchronously
+                    printfn "📋 Found %d space(s):" spacesResult.Length
+                    spacesResult |> List.iteri (fun i space ->
+                        printfn "    %d. %s (ID: %s)" (i + 1) space.Name space.Id)
+
+                    if spacesResult.Length = 0 then
+                        printfn "⚠️  No spaces returned - this might indicate:"
+                        printfn "    - Using an older Octopus version without spaces"
+                        printfn "    - API key lacks permission to list spaces"
+                        printfn "    - Need to query default space directly"
+                | Error errorMsg ->
+                    printfn "❌ Connection failed: %s" errorMsg
+                    printfn "💡 This confirms you need to be on the VPN or check network connectivity"
+
+                // Get projects
+                printfn "🔍 Querying projects..."
+                let targetSpace = spaceId |> Option.defaultValue "Default"
+                let projectApiUrl = 
+                    if spaceId.IsSome then 
+                        sprintf "%s/api/%s/projects" baseUrl spaceId.Value
+                    else 
+                        sprintf "%s/api/projects" baseUrl
+                printfn "    Making API call to: %s" projectApiUrl
+
+                let gitRepos = GitOperations.getCachedRepositories()
+                let projects = OctopusClient.getProjectsWithGitInfo config gitRepos |> Async.AwaitTask |> Async.RunSynchronously
+                printfn "📋 Found %d Octopus project(s):" projects.Length
+                if projects.Length = 0 then
+                    printfn "    No projects found in the target space."
+                    if spaceId.IsSome then
+                        printfn "    💡 Try using just the base URL without space ID for default space"
                     else
-                        // Compressed view for regular projects
-                        printfn $"{i + 1}. {project.Name}"
-                        
-                        // Only show GitHub repos if found
-                        if not (String.IsNullOrEmpty(project.Description)) then
-                            let githubUrls = OctopusOperations.extractGitHubUrls project.Description
-                            if not githubUrls.IsEmpty then
-                                let matches = OctopusOperations.matchGitHubUrlsWithRepos githubUrls gitRepos
-                                if not matches.IsEmpty then
-                                    let repoNames = matches |> List.map (fun (_, repoName, _) -> repoName) |> String.concat ", "
-                                    printfn $"    🔗 {matches.Length} GitHub repo(s): {repoNames}")
+                        printfn "    💡 This might be an older Octopus version or permission issue"
 
-            // Check if user wants to search for variables
-            match OctopusOperations.getVariableSearchPattern () with
-            | Some pattern ->
-                printfn "\n🔍 Searching for variables matching '%s'..." pattern
-                let variables = OctopusClient.searchVariables config pattern |> Async.AwaitTask |> Async.RunSynchronously
-                
-                if variables.Length > 0 then
-                    printfn "📋 Found %d variable(s):" variables.Length
-                    variables |> List.iteri (fun i var ->
-                        let valueDisplay = if var.IsSensitive then "[SENSITIVE - Cannot retrieve]" else (var.Value |> Option.defaultValue "[Empty]")
-                        printfn "%d. %s" (i + 1) var.Name
-                        printfn "    Value: %s" valueDisplay
-                        printfn "    Sensitive: %b" var.IsSensitive
-                        printfn "    Scope: %s" var.Scope
-                        match var.ProjectName with
-                        | Some projectName -> printfn "    Project: %s" projectName
-                        | None -> ()
-                        match var.LibrarySetName with
-                        | Some libName -> printfn "    Library Set: %s" libName
-                        | None -> ()
-                        printfn "")
-                else
-                    printfn "❌ No variables found matching the pattern."
-            | None -> ()
+                // Display projects with detailed information
+                for i, project in projects |> List.indexed do
+                    let description = if String.IsNullOrEmpty(project.Description) then "(no description)" else project.Description
+                    if project.Name.Contains("nextgen", StringComparison.OrdinalIgnoreCase) then
+                        printfn "%d. %s ⭐ NEXTGEN PROJECT" (i + 1) project.Name
+                        printfn "    ID: %s" project.Id
+                        printfn "    Space: %s" project.SpaceName
+                        printfn "    Description: %s" description
+                        printfn "    Disabled: %b" project.IsDisabled
 
-            // Check if user wants to analyze a specific deployment step
-            match OctopusOperations.getProjectStepAnalysis () with
-            | Some (projectName, stepNumber) ->
-                printfn "\n🔍 Analyzing deployment step %s in project '%s'..." stepNumber projectName
-                let stepsResult = OctopusClient.getProjectDeploymentProcess config projectName |> Async.AwaitTask |> Async.RunSynchronously
-                
-                match stepsResult with
-                | Ok steps ->
-                    // Try to match by step number (if it's an integer) or by step name (if it contains the identifier)
-                    let matchingStep = 
-                        steps |> List.tryFind (fun step -> 
-                            // Try multiple matching strategies:
-                            // 1. Exact step number match (if stepNumber is parseable as int)
-                            match System.Int32.TryParse(stepNumber) with
-                            | (true, stepNum) when step.StepNumber = stepNum -> true
-                            | _ -> 
-                                // 2. Step ID contains the identifier
-                                step.StepId.Contains(stepNumber, System.StringComparison.OrdinalIgnoreCase) ||
-                                // 3. Step name contains the identifier
-                                step.Name.Contains(stepNumber, System.StringComparison.OrdinalIgnoreCase) ||
-                                // 4. Identifier contains the step number
-                                stepNumber.Contains(step.StepNumber.ToString()))
-                    
-                    match matchingStep with
-                    | Some step ->
-                        printfn $"📋 Step Analysis: {step.Name}"
-                        printfn $"    Step Number: {step.StepNumber}"
-                        printfn $"    Step ID: {step.StepId}"
-                        printfn $"    Action Type: {step.ActionType}"
-                        
-                        // Show PowerShell script if available
-                        match step.PowerShellScript with
-                        | Some script ->
-                            printfn $"    PowerShell Script:"
-                            printfn $"    ┌─ Script Content ─────────────────────────────────────"
-                            script.Split('\n') |> Array.iteri (fun i line -> 
-                                printfn $"    │ {i + 1:D3}: {line}")
-                            printfn $"    └─────────────────────────────────────────────────────"
-                        | None -> printfn $"    PowerShell Script: None"
-                        
-                        // Show step template information if available
-                        match step.StepTemplateId with
-                        | Some templateId ->
-                            printfn $"    Step Template: {step.StepTemplate |> Option.defaultValue templateId}"
-                            printfn $"    🔍 Fetching template details..."
-                            
-                            let templateResult = OctopusClient.getStepTemplate config templateId |> Async.AwaitTask |> Async.RunSynchronously
-                            match templateResult with
-                            | Ok templateInfo ->
-                                printfn $"    Template Name: {templateInfo.Name}"
-                                printfn $"    Template Description: {templateInfo.Description}"
-                                
-                                match templateInfo.GitRepositoryUrl with
-                                | Some gitUrl ->
-                                    printfn $"    🔗 Git Repository: {gitUrl}"
-                                    match templateInfo.GitPath with
-                                    | Some gitPath -> printfn $"    📁 Git Path: {gitPath}"
-                                    | None -> ()
-                                | None -> ()
-                                
-                                match templateInfo.PowerShellScript with
-                                | Some templateScript ->
-                                    printfn $"    Template PowerShell Script:"
-                                    printfn $"    ┌─ Template Script Content ───────────────────────────"
-                                    templateScript.Split('\n') |> Array.iteri (fun i line -> 
-                                        printfn $"    │ {i + 1:D3}: {line}")
-                                    printfn $"    └─────────────────────────────────────────────────────"
-                                | None -> printfn $"    Template PowerShell Script: None"
-                            | Error err ->
-                                printfn $"    ❌ Error fetching template: {err}"
-                        | None -> printfn $"    Step Template: None (inline step)"
-                        
-                        // Show variables count
-                        printfn $"    Variables Available: {step.Variables.Length}"
-                        if step.Variables.Length > 0 then
-                            printfn $"    🔧 Project Variables:"
-                            step.Variables |> List.take (min 5 step.Variables.Length) |> List.iter (fun var ->
-                                let valueDisplay = if var.IsSensitive then "[SENSITIVE]" else (var.Value |> Option.defaultValue "[Empty]")
-                                printfn $"      - {var.Name}: {valueDisplay}")
-                            if step.Variables.Length > 5 then
-                                printfn $"      ... and {step.Variables.Length - 5} more variables"
-                        
-                        // Show key properties
-                        printfn $"    Properties: {step.Properties.Count}"
-                        if step.Properties.Count > 0 then
-                            printfn $"    🔧 Key Properties:"
-                            step.Properties 
-                            |> Map.toList 
-                            |> List.filter (fun (key, _) -> 
-                                key.Contains("Script") || key.Contains("Template") || key.Contains("Package"))
-                            |> List.take 5
-                            |> List.iter (fun (key, value) ->
-                                let displayValue = if value.Length > 100 then value.Substring(0, 100) + "..." else value
-                                printfn $"      - {key}: {displayValue}")
-                    | None ->
-                        printfn $"❌ Step '{stepNumber}' not found in project '{projectName}'"
-                        printfn $"Available steps:"
-                        steps |> List.iter (fun step ->
-                            printfn $"  {step.StepNumber}. {step.Name} (ID: {step.StepId})")
-                | Error err ->
-                    printfn $"❌ Error analyzing project: {err}"
-            | None -> ()
+                        // Show git repository information
+                        match project.GitRepoUrl with
+                        | Some gitUrl ->
+                            // Find matching GitHub repositories
+                            let matchingGitHubRepos = OctopusOperations.findMatchingGitHubRepos [project] (GitOperations.getCachedRepositories())
+                            if matchingGitHubRepos.Length > 0 then
+                                printfn "    🔗 GitHub Repositories:"
+                                for (githubUrl, repoName, localRepoUrl) in matchingGitHubRepos do
+                                    printfn "        📁 %s: %s" repoName githubUrl
+                                    printfn "           Local: %s" localRepoUrl
+                            else
+                                printfn "    🔗 Git Repository: %s (no local match found)" gitUrl
+                        | None ->
+                            printfn "    🔗 Git Repository: (not configured)"
 
-            // Show unmatched git repositories (those not linked to any Octopus project)
-            let totalGitRepos = GitOperations.getGitReposFromCache ()
-            if totalGitRepos.Length = 0 then
-                printfn "\n📁 No git repositories found in cache. Run the git scan first to populate the cache."
-            else
-                // Find all GitHub URLs that were matched with projects
-                let allMatchedGitRepos = 
-                    projects 
+                // Check for git repositories and show matching information
+                let totalGitRepos = GitOperations.getCachedRepositories()
+                let matchedGitRepoResults = 
+                    projects
                     |> List.collect (fun project ->
-                        if not (String.IsNullOrEmpty(project.Description)) then
-                            let githubUrls = OctopusOperations.extractGitHubUrls project.Description
-                            OctopusOperations.matchGitHubUrlsWithRepos githubUrls totalGitRepos
-                        else [])
+                        match project.GitRepoUrl with
+                        | Some gitUrl when gitUrl.Contains("github.com") ->
+                            OctopusOperations.findMatchingGitHubRepos [project] totalGitRepos
+                        | _ -> [])
+                
+                let allMatchedGitRepos = 
+                    matchedGitRepoResults
                     |> List.map (fun (_, repoName, repoUrl) -> (repoName, repoUrl))
                     |> Set.ofList
                 
@@ -911,8 +329,8 @@ let main () =
                     printfn "\n📁 Local Git Repositories (%d total, %d matched with Octopus projects):" totalGitRepos.Length allMatchedGitRepos.Count
                     printfn "🔗 Matched repositories are shown above with their Octopus projects"
                     printfn "📂 Unmatched local repositories (%d):" unmatchedRepos.Length
-                    unmatchedRepos |> List.iter (fun (name, url) -> 
-                        printfn "  - %s: %s" name url)
+                    for (name, url) in unmatchedRepos do
+                        printfn "  - %s: %s" name url
                 else
                     printfn "\n📁 All %d local git repositories are matched with Octopus projects! 🎉" totalGitRepos.Length
 
@@ -955,8 +373,7 @@ let main () =
             printfn "  --search-variable <pattern> Search for Octopus variables matching pattern"
             printfn "  --analyze-step <project/step> Analyze specific deployment step"
 
-    // GitHub Integration Demo (skip if search-only mode)
-    if not skipGitOps then
+        // GitHub Integration Demo
         printfn "\n%s" (String.replicate 50 "=")
         printfn "GitHub Integration Demo"
         printfn "%s" (String.replicate 50 "=")
@@ -978,14 +395,14 @@ let main () =
             printfn "Example:"
             printfn "  $env:GITHUB_TOKEN=\"your_token_here\""
 
-    // Perform git pull operations if requested
-    GitOperations.performGitPulls repoInfos
+        // Perform git pull operations if requested
+        GitOperations.performGitPulls repoInfos
 
-    // Perform file indexing if requested
-    FileIndexingOperations.performFileIndexing repoInfos
+        // Perform file indexing if requested
+        FileIndexingOperations.performFileIndexing repoInfos
 
-    // Perform text search if requested
-    FileIndexingOperations.performTextSearch ()
+    // Perform text search if requested (can work without repoInfos)
+    SearchOperations.performTextSearch ()
 
     printfn "\nSearch completed."
 

@@ -126,8 +126,12 @@ module OctopusClient =
 
     /// Result type for Octopus project with related git repository information
     type OctopusProjectWithGit =
-        { OctopusUrl: string
-          ProjectName: string
+        { Id: string
+          Name: string
+          Description: string
+          IsDisabled: bool
+          SpaceName: string
+          OctopusUrl: string
           GitRepoUrl: string option }
 
     /// Get all projects from Octopus and match them with git repositories
@@ -151,8 +155,12 @@ module OctopusClient =
 
                     let gitRepoUrl = matchingGitRepo |> Option.map snd
 
-                    { OctopusUrl = config.ServerUrl
-                      ProjectName = project.Name
+                    { Id = project.Id
+                      Name = project.Name
+                      Description = project.Description
+                      IsDisabled = project.IsDisabled
+                      SpaceName = project.SpaceName
+                      OctopusUrl = config.ServerUrl
                       GitRepoUrl = gitRepoUrl })
         }
 
