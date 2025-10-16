@@ -184,6 +184,30 @@ let getOctopusUrl () =
         else
             None
 
+// Extract GitHub URLs from project descriptions
+let extractGitHubUrls (description: string) =
+    if String.IsNullOrEmpty(description) then []
+    else
+        let githubPattern = @"https://github\.com/[^\s<>)]+[^\s<>).,]"
+        let regex = System.Text.RegularExpressions.Regex(githubPattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+        regex.Matches(description)
+        |> Seq.cast<System.Text.RegularExpressions.Match>
+        |> Seq.map (fun m -> m.Value)
+        |> List.ofSeq
+
+// Match GitHub URLs with cached git repositories
+let matchGitHubUrlsWithRepos (githubUrls: string list) (gitRepos: (string * string) list) =
+    githubUrls
+    |> List.choose (fun githubUrl ->
+        gitRepos 
+        |> List.tryFind (fun (_, repoUrl) -> 
+            // Normalize URLs for comparison (remove .git, trailing slashes, etc.)
+            let normalizeUrl (url: string) = 
+                url.TrimEnd('/').Replace(".git", "").ToLower()
+            normalizeUrl repoUrl = normalizeUrl githubUrl ||
+            repoUrl.Contains(githubUrl.Replace("https://github.com/", ""), System.StringComparison.OrdinalIgnoreCase))
+        |> Option.map (fun (repoName, repoUrl) -> (githubUrl, repoName, repoUrl)))
+
 // Format API key for display (show first 8 chars like Octopus UI, but ensure security)
 let formatApiKeyForDisplay (apiKey: string) =
     if isNull apiKey then
@@ -406,13 +430,66 @@ let main () =
                 else
                     printfn $"    💡 This might be an older Octopus version or permission issue"
             else
+                let gitRepos = getGitReposFromCache ()
+                
                 projects |> List.iteri (fun i project ->
-                    let description = if String.IsNullOrEmpty(project.Description) then "(no description)" else project.Description
-                    printfn $"{i + 1}. {project.Name}"
-                    printfn $"    ID: {project.Id}"
-                    printfn $"    Space: {project.SpaceName}"
-                    printfn $"    Description: {description}"
-                    printfn $"    Disabled: {project.IsDisabled}")
+                    // Check if this is a NextGen project first
+                    let isNextGen = project.Name.Contains("NextGen", System.StringComparison.OrdinalIgnoreCase)
+                    
+                    if isNextGen then
+                        // Full details for NextGen projects
+                        let description = if String.IsNullOrEmpty(project.Description) then "(no description)" else project.Description
+                        printfn $"{i + 1}. {project.Name} ⭐ NEXTGEN PROJECT"
+                        printfn $"    ID: {project.Id}"
+                        printfn $"    Space: {project.SpaceName}"
+                        printfn $"    Description: {description}"
+                        printfn $"    Disabled: {project.IsDisabled}"
+                        
+                        // Extract and match GitHub URLs from project description
+                        if not (String.IsNullOrEmpty(project.Description)) then
+                            let githubUrls = extractGitHubUrls project.Description
+                            if not githubUrls.IsEmpty then
+                                let matches = matchGitHubUrlsWithRepos githubUrls gitRepos
+                                if not matches.IsEmpty then
+                                    printfn $"    🔗 GitHub Repositories:"
+                                    matches |> List.iter (fun (githubUrl, repoName, localRepoUrl) ->
+                                        printfn $"        📁 {repoName}: {githubUrl}"
+                                        printfn $"           Local: {localRepoUrl}")
+                                else
+                                    printfn $"    🔗 GitHub URLs found (no local matches):"
+                                    githubUrls |> List.iter (fun url -> printfn $"        {url}")
+                        
+                        // Show deployment process steps for NextGen projects
+                        printfn $"    🚀 NextGen Project - Fetching deployment steps..."
+                        try
+                            let stepsResult = OctopusClient.getProjectDeploymentProcess config project.Name |> Async.AwaitTask |> Async.RunSynchronously
+                            match stepsResult with
+                            | Ok steps when steps.Length > 0 ->
+                                printfn $"    📋 Deployment Steps ({steps.Length}):"
+                                steps |> List.take (min 5 steps.Length) |> List.iter (fun step ->
+                                    printfn $"        {step.StepNumber}. {step.Name} ({step.ActionType})")
+                                if steps.Length > 5 then
+                                    printfn $"        ... and {steps.Length - 5} more steps"
+                            | Ok _ ->
+                                printfn $"    📋 No deployment steps found"
+                            | Error err ->
+                                printfn $"    ❌ Error fetching steps: {err}"
+                        with
+                        | ex -> printfn $"    ❌ Exception fetching steps: {ex.Message}"
+                        
+                        printfn ""
+                    else
+                        // Compressed view for regular projects
+                        printfn $"{i + 1}. {project.Name}"
+                        
+                        // Only show GitHub repos if found
+                        if not (String.IsNullOrEmpty(project.Description)) then
+                            let githubUrls = extractGitHubUrls project.Description
+                            if not githubUrls.IsEmpty then
+                                let matches = matchGitHubUrlsWithRepos githubUrls gitRepos
+                                if not matches.IsEmpty then
+                                    let repoNames = matches |> List.map (fun (_, repoName, _) -> repoName) |> String.concat ", "
+                                    printfn $"    🔗 {matches.Length} GitHub repo(s): {repoNames}")
 
             // Check if user wants to search for variables
             match getVariableSearchPattern () with
@@ -542,13 +619,35 @@ let main () =
                     printfn $"❌ Error analyzing project: {err}"
             | None -> ()
 
-            // Show cached git repos for potential matching
-            let gitRepos = getGitReposFromCache ()
-            if gitRepos.Length > 0 then
-                printfn $"\n📁 Found {gitRepos.Length} git repositories in cache for potential matching:"
-                gitRepos |> List.iter (fun (name, url) -> printfn $"  - {name}: {url}")
-            else
+            // Show unmatched git repositories (those not linked to any Octopus project)
+            let totalGitRepos = getGitReposFromCache ()
+            if totalGitRepos.Length = 0 then
                 printfn "\n📁 No git repositories found in cache. Run the git scan first to populate the cache."
+            else
+                // Find all GitHub URLs that were matched with projects
+                let allMatchedGitRepos = 
+                    projects 
+                    |> List.collect (fun project ->
+                        if not (String.IsNullOrEmpty(project.Description)) then
+                            let githubUrls = extractGitHubUrls project.Description
+                            matchGitHubUrlsWithRepos githubUrls totalGitRepos
+                        else [])
+                    |> List.map (fun (_, repoName, repoUrl) -> (repoName, repoUrl))
+                    |> Set.ofList
+                
+                // Find unmatched repos
+                let unmatchedRepos = 
+                    totalGitRepos 
+                    |> List.filter (fun repo -> not (allMatchedGitRepos.Contains(repo)))
+                
+                if unmatchedRepos.Length > 0 then
+                    printfn $"\n📁 Local Git Repositories ({totalGitRepos.Length} total, {allMatchedGitRepos.Count} matched with Octopus projects):"
+                    printfn $"🔗 Matched repositories are shown above with their Octopus projects"
+                    printfn $"📂 Unmatched local repositories ({unmatchedRepos.Length}):"
+                    unmatchedRepos |> List.iter (fun (name, url) -> 
+                        printfn $"  - {name}: {url}")
+                else
+                    printfn $"\n📁 All {totalGitRepos.Length} local git repositories are matched with Octopus projects! 🎉"
 
         with
         | ex -> 
