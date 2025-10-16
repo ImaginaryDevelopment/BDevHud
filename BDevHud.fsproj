@@ -13,6 +13,7 @@
   <ItemGroup>
     <ProjectReference Include="src\IO.Adapter\IO.Adapter.fsproj" />
     <ProjectReference Include="src\Octo.Adapter\Octo.Adapter.fsproj" />
+    <ProjectReference Include="src\GitHub.Adapter\GitHub.Adapter.fsproj" />
   </ItemGroup>
 
 </Project>

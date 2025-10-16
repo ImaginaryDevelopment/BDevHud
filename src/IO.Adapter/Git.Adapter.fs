@@ -3,6 +3,7 @@ namespace IO.Adapter
 open System
 open System.Diagnostics
 open System.IO
+open System.Web
 
 /// Git operations adapter for running git commands
 module GitAdapter =
@@ -207,3 +208,23 @@ module GitAdapter =
                     (false, "Failed to start git pull process")
         with ex ->
             (false, $"Exception: {ex.Message}")
+
+    /// Extract repository name from a git URL
+    /// Parses the last segment of the URL path, removing .git extension if present
+    let extractRepoName (url: string) : string =
+        try
+            let decodedUrl = HttpUtility.UrlDecode(url)
+            let uri = Uri(decodedUrl)
+            let segments = uri.Segments
+
+            if segments.Length > 0 then
+                let lastSegment = segments.[segments.Length - 1]
+
+                if lastSegment.EndsWith(".git") then
+                    lastSegment.Substring(0, lastSegment.Length - 4)
+                else
+                    lastSegment
+            else
+                "unknown"
+        with _ ->
+            "unknown"

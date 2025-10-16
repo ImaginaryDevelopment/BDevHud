@@ -9,22 +9,36 @@ BDevHud is designed to be a centralized dashboard and automation tool for develo
 ## Solution Structure
 
 ### Core Application
+
 - **BDevHud** - Main console application and entry point
 - **Program.fs** - Application startup and coordination logic
 
 ### Adapters
 
 #### IO.Adapter
-*Note: Currently split across two locations - consolidation needed*
 
-- **IO.Adapter/** (root level):
-  - **DirectoryTraversal.fs** - File system navigation and directory operations
-  - **Git.Adapter.fs** - Git repository interaction and version control operations
-- **src/Io.Adapter/**: 
-  - **Library.fs** - Core I/O functionality and helper methods
+Located in `src/IO.Adapter/`, this adapter provides local file system and Git operations:
+
+- **DirectoryTraversal.fs** - File system navigation and directory operations
+- **Git.Adapter.fs** - Git repository interaction and version control operations
+  - Execute git commands (remote, pull)
+  - Parse git remote output
+  - Extract repository names from URLs
+
+#### GitHub.Adapter
+
+Located in `src/GitHub.Adapter/`, this adapter provides GitHub API integration:
+
+- **GitHub.Adapter.fs** - Client library for interacting with GitHub API
+  - Repository querying and search
+  - Organization and user repository access
+  - Wildcard pattern filtering
+  - Authentication via personal access tokens
 
 #### Octo.Adapter
+
 Located in `src/Octo.Adapter/`, this adapter provides Octopus Deploy integration:
+
 - **OctopusClient.fs** - Client library for interacting with Octopus Deploy API
   - Query projects from Octopus spaces
   - Parse space URLs and extract space identifiers
@@ -34,14 +48,23 @@ Located in `src/Octo.Adapter/`, this adapter provides Octopus Deploy integration
 ## Features
 
 ### Current Capabilities
+
 - **File System Operations** - Directory traversal and file management
-- **Git Integration** - Version control operations and repository management  
+- **Git Integration** - Version control operations and repository management
+  - Git remote information parsing
+  - Automated git pull operations
+  - Repository caching and persistence
+- **GitHub Integration** - GitHub API operations and repository management
+  - Repository querying with wildcard filtering
+  - Organization and user repository access
+  - Authentication via personal access tokens
 - **Octopus Deploy Integration** - Project querying and space management
   - Support for space URL parsing (e.g., `https://octopus.company.com/app#/Spaces-123`)
   - Project listing and metadata retrieval
   - Async/Task-based operations with proper error handling
 
 ### Architecture
+
 - **F# First** - Built entirely in F# leveraging functional programming paradigms
 - **Adapter Pattern** - Modular adapters for different systems and services
 - **Async Operations** - Task-based asynchronous operations throughout
@@ -49,18 +72,26 @@ Located in `src/Octo.Adapter/`, this adapter provides Octopus Deploy integration
 - **Error Handling** - Result types for predictable error management
 
 ## Technology Stack
+
 - **.NET 9.0** - Target framework for all projects
 - **F#** - Primary programming language
-- **Octopus.Client** - Official Octopus Deploy .NET client library
+
+### Package Dependencies
+
+- **Octokit** - Official GitHub .NET client library for GitHub API integration
+- **Octopus.Client** - Official Octopus Deploy .NET client library for Octopus API integration
 
 ## Getting Started
 
 ### Prerequisites
+
 - .NET 9.0 SDK
 - Access to target systems (Git repositories, Octopus Deploy instances)
 
 ### Configuration
+
 The Octo.Adapter requires configuration for Octopus Deploy connectivity:
+
 ```fsharp
 let config = {
     ServerUrl = "https://your-octopus-server.com"
@@ -71,7 +102,27 @@ let config = {
 
 ### Usage Examples
 
+#### Querying GitHub Repositories
+
+```fsharp
+open GitHub.Adapter
+
+let config = {
+    Token = "ghp_your_token_here"
+}
+
+// Get all repositories for authenticated user
+let! repos = GitHubAdapter.getRepositories config None
+
+// Get repositories with wildcard filtering
+let! filteredRepos = GitHubAdapter.getRepositories config (Some "myapp*")
+
+// Get organization repositories
+let! orgRepos = GitHubAdapter.getOrganizationRepositories config "myorg"
+```
+
 #### Querying Octopus Projects
+
 ```fsharp
 open Octo.Adapter
 
@@ -86,12 +137,15 @@ match result with
 ```
 
 ## Documentation
+
 - **[Octopus Deploy Git-Backed Concepts](src/Octo.Adapter/GitBackedConcepts.md)** - Comprehensive guide to Octopus Deploy's Config as Code functionality
 
 ## Project Status
+
 🚧 **In Development** - Core adapters and functionality are being built out
 
 ### Roadmap
+
 - Enhanced Git operations and repository analysis
 - Extended Octopus Deploy management capabilities
 - Web-based dashboard interface
@@ -99,7 +153,9 @@ match result with
 - Additional adapter integrations (CI/CD systems, cloud providers)
 
 ## Contributing
+
 This is a development tool project. Contributions and suggestions are welcome as the solution evolves.
 
 ## License
+
 [License information to be determined]
