@@ -63,15 +63,29 @@ let findGitFolders (rootDirectory: string option) =
         DirectoryTraversal.traverseAllLocalDrives processDirectoryForGit [] combineResults
         |> List.toArray
 
-/// Display results of git folder search with remote information and git pull
-let displayGitFolders (gitFolders: string[]) =
+/// Represents git repository information
+type GitRepoInfo = {
+    Path: string
+    RemoteUrl: string option
+    RepoName: string
+}
+
+// Check if git pull operations should be performed
+let shouldPullRepos () =
+    let args = Environment.GetCommandLineArgs()
+    args |> Array.contains "--pull-repos" || args |> Array.contains "--pull"
+
+/// Display results of git folder search with remote information (no git pull by default)
+let displayGitFolders (gitFolders: string[]) : GitRepoInfo list =
     if gitFolders.Length = 0 then
         printfn "No .git folders found."
+        []
     else
         printfn $"\nFound {gitFolders.Length} .git folder(s):"
 
         // Load existing cache
         let mutable cache = HudCache.loadCache ()
+        let mutable repoInfos = []
 
         gitFolders
         |> Array.iteri (fun i folder ->
@@ -103,36 +117,87 @@ let displayGitFolders (gitFolders: string[]) =
                     let decodedUrl = HttpUtility.UrlDecode(url)
                     printfn $"    {name}      {decodedUrl} ({operationType})")
 
-                // Run git pull for this repository
-                let (pullSuccess, pullError) = GitAdapter.gitPull parentDir
-
-                if not pullSuccess then
-                    printfn $"    ⚠️  Git pull failed: {pullError}"
-
-                // Update cache with repository information
+                // Store repository information (no git pull by default)
                 let primaryRemote = groupedRemotes |> List.head
                 let (_, url, _) = primaryRemote
                 let repoName = extractRepoName url
                 let repoUrl = HttpUtility.UrlDecode(url)
 
+                // Add to repo info list
+                let repoInfo = {
+                    Path = parentDir
+                    RemoteUrl = Some repoUrl
+                    RepoName = repoName
+                }
+                repoInfos <- repoInfo :: repoInfos
+
+                // Update cache with repository information (without pull date update)
                 let cacheEntry =
                     { Name = repoName
                       LastPullDate =
-                        if pullSuccess then
-                            DateTime.Now.ToString("yyyyMMdd.HHmmss")
-                        else
-                            (cache.TryFind(parentDir)
-                             |> Option.map (fun e -> e.LastPullDate)
-                             |> Option.defaultValue "")
+                        (cache.TryFind(parentDir)
+                         |> Option.map (fun e -> e.LastPullDate)
+                         |> Option.defaultValue "")
                       FileSystemPath = parentDir
                       RepoUrl = repoUrl }
 
                 cache <- cache.Add(parentDir, cacheEntry)
             else
-                printfn "    (no remote configured)")
+                printfn "    (no remote configured)"
+                // Add to repo info list even without remote
+                let repoInfo = {
+                    Path = parentDir
+                    RemoteUrl = None
+                    RepoName = Path.GetFileName(parentDir)
+                }
+                repoInfos <- repoInfo :: repoInfos)
 
         // Save updated cache
         HudCache.saveCache cache
+        
+        // Return collected repository information
+        List.rev repoInfos
+
+/// Perform git pull operations on repositories if requested
+let performGitPulls (repoInfos: GitRepoInfo list) =
+    if shouldPullRepos() then
+        printfn "\n%s" (String.replicate 50 "=")
+        printfn "Git Pull Operations"
+        printfn "%s" (String.replicate 50 "=")
+        printfn $"Pulling {repoInfos.Length} repositories..."
+
+        // Load existing cache for updating pull dates
+        let mutable cache = HudCache.loadCache ()
+
+        repoInfos
+        |> List.iteri (fun i repoInfo ->
+            printfn $"\n[{i + 1}/{repoInfos.Length}] Pulling: {repoInfo.RepoName}"
+            printfn $"    Path: {repoInfo.Path}"
+
+            // Run git pull for this repository
+            let (pullSuccess, pullError) = GitAdapter.gitPull repoInfo.Path
+
+            if pullSuccess then
+                printfn "    ✅ Pull successful"
+                
+                // Update cache with successful pull date
+                match repoInfo.RemoteUrl with
+                | Some url ->
+                    let cacheEntry =
+                        { Name = repoInfo.RepoName
+                          LastPullDate = DateTime.Now.ToString("yyyyMMdd.HHmmss")
+                          FileSystemPath = repoInfo.Path
+                          RepoUrl = url }
+                    cache <- cache.Add(repoInfo.Path, cacheEntry)
+                | None -> ()
+            else
+                printfn $"    ❌ Pull failed: {pullError}")
+
+        // Save updated cache
+        HudCache.saveCache cache
+        printfn "\nGit pull operations completed."
+    else
+        printfn "\n💡 Use --pull-repos flag to perform git pull operations on all repositories"
 
 // Get root directory from command line args or environment variable
 let getRootDirectory () =
@@ -283,6 +348,11 @@ let getOctopusApiKey () =
         else
             None
 
+// Check for skip deployment steps flag from command line args
+let getSkipDeploymentSteps () =
+    let args = Environment.GetCommandLineArgs()
+    args |> Array.contains "--skip-deployment-steps"
+
 // Display Octopus projects with git repository information
 let displayOctopusProjects (projects: OctopusClient.OctopusProjectWithGit list) =
     if projects.Length = 0 then
@@ -318,7 +388,7 @@ let main () =
 
     let rootDirectory = getRootDirectory ()
     let gitFolders = findGitFolders rootDirectory
-    displayGitFolders gitFolders
+    let repoInfos = displayGitFolders gitFolders
 
     // Check for Octopus URL and API key, then display Octopus projects
     let octopusUrl = getOctopusUrl ()
@@ -461,23 +531,36 @@ let main () =
                                     printfn $"    🔗 GitHub URLs found (no local matches):"
                                     githubUrls |> List.iter (fun url -> printfn $"        {url}")
                         
-                        // Show deployment process steps for NextGen projects
-                        printfn $"    🚀 NextGen Project - Fetching deployment steps..."
-                        try
-                            let stepsResult = OctopusClient.getProjectDeploymentProcess config project.Name |> Async.AwaitTask |> Async.RunSynchronously
-                            match stepsResult with
-                            | Ok steps when steps.Length > 0 ->
-                                printfn $"    📋 Deployment Steps ({steps.Length}):"
-                                steps |> List.take (min 5 steps.Length) |> List.iter (fun step ->
-                                    printfn $"        {step.StepNumber}. {step.Name} ({step.ActionType})")
-                                if steps.Length > 5 then
-                                    printfn $"        ... and {steps.Length - 5} more steps"
-                            | Ok _ ->
-                                printfn $"    📋 No deployment steps found"
-                            | Error err ->
-                                printfn $"    ❌ Error fetching steps: {err}"
-                        with
-                        | ex -> printfn $"    ❌ Exception fetching steps: {ex.Message}"
+                        // Show deployment process steps for NextGen projects (if not skipped)
+                        let skipSteps = getSkipDeploymentSteps()
+                        if skipSteps then
+                            printfn $"    🚀 NextGen Project - Deployment step analysis skipped (--skip-deployment-steps)"
+                        else
+                            printfn $"    🚀 NextGen Project - Fetching deployment steps..."
+                            try
+                                let stepsResult = OctopusClient.getProjectDeploymentProcess config project.Name |> Async.AwaitTask |> Async.RunSynchronously
+                                match stepsResult with
+                                | Ok steps when steps.Length > 0 ->
+                                    printfn $"    📋 Deployment Steps ({steps.Length}):"
+                                    steps |> List.take (min 5 steps.Length) |> List.iter (fun step ->
+                                        printfn $"        {step.StepNumber}. {step.Name} ({step.ActionType})")
+                                    if steps.Length > 5 then
+                                        printfn $"        ... and {steps.Length - 5} more steps"
+                                | Ok _ ->
+                                    printfn $"    📋 No deployment steps found"
+                                | Error err when err.Contains("Resource is not found") ->
+                                    printfn $"    ❌ Deployment steps access denied: {err}"
+                                    printfn $"    💡 API key may lack 'DeploymentView' or 'ProcessView' permissions"
+                                    printfn $"    💡 Contact your Octopus administrator to grant deployment process access"
+                                    printfn $"    💡 You can use --skip-deployment-steps to disable this feature"
+                                | Error err ->
+                                    printfn $"    ❌ Error fetching steps: {err}"
+                            with
+                            | ex -> 
+                                printfn $"    ❌ Exception fetching steps: {ex.Message}"
+                                if ex.Message.Contains("Resource is not found") then
+                                    printfn $"    💡 This is likely a permissions issue with your API key"
+                                    printfn $"    💡 You can use --skip-deployment-steps to disable this feature"
                         
                         printfn ""
                     else
@@ -682,6 +765,12 @@ let main () =
         printfn "  With space: https://octopus.rbxd.ds/app#/Spaces-1"
         printfn "  Environment variable: $env:OCTOPUS_URL=\"https://octopus.rbxd.ds/\""
         printfn "  Environment variable: $env:OCTO_API_KEY=\"API-YOURKEY\""
+        printfn ""
+        printfn "Additional Options:"
+        printfn "  --pull-repos              Perform git pull on all repositories (moved to end for performance)"
+        printfn "  --skip-deployment-steps    Skip deployment step analysis (useful if API key lacks permissions)"
+        printfn "  --search-variable <pattern> Search for Octopus variables matching pattern"
+        printfn "  --analyze-step <project/step> Analyze specific deployment step"
 
     // GitHub Integration Demo
     printfn "\n%s" (String.replicate 50 "=")
@@ -704,6 +793,9 @@ let main () =
         printfn "Set GITHUB_TOKEN environment variable to enable."
         printfn "Example:"
         printfn "  $env:GITHUB_TOKEN=\"your_token_here\""
+
+    // Perform git pull operations if requested
+    performGitPulls repoInfos
 
     printfn "\nSearch completed."
 
