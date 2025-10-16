@@ -187,7 +187,7 @@ module GitAdapter =
                     gitProcess.BeginOutputReadLine()
                     gitProcess.BeginErrorReadLine()
 
-                    let completed = gitProcess.WaitForExit(10000) // 10 second timeout
+                    let completed = gitProcess.WaitForExit(30000) // 30 second timeout
 
                     if completed then
                         let outputStr = output.ToString().Trim()
@@ -208,6 +208,69 @@ module GitAdapter =
                     (false, "Failed to start git pull process")
         with ex ->
             (false, $"Exception: {ex.Message}")
+
+    /// Gets the current branch name for a repository
+    /// Returns the current branch name or error message
+    let getCurrentBranch (folderPath: string) : (bool * string) =
+        try
+            if not (isGitRepository folderPath) then
+                (false, "Not a git repository")
+            else
+                let startInfo = ProcessStartInfo()
+                startInfo.FileName <- "git"
+                startInfo.Arguments <- "branch --show-current"
+                startInfo.WorkingDirectory <- folderPath
+                startInfo.UseShellExecute <- false
+                startInfo.RedirectStandardOutput <- true
+                startInfo.RedirectStandardError <- true
+                startInfo.CreateNoWindow <- true
+
+                use gitProcess = new Process()
+                gitProcess.StartInfo <- startInfo
+
+                let output = System.Text.StringBuilder()
+                let error = System.Text.StringBuilder()
+
+                gitProcess.OutputDataReceived.Add(fun e ->
+                    if not (String.IsNullOrEmpty(e.Data)) then
+                        output.AppendLine(e.Data) |> ignore)
+
+                gitProcess.ErrorDataReceived.Add(fun e ->
+                    if not (String.IsNullOrEmpty(e.Data)) then
+                        error.AppendLine(e.Data) |> ignore)
+
+                let started = gitProcess.Start()
+
+                if started then
+                    gitProcess.BeginOutputReadLine()
+                    gitProcess.BeginErrorReadLine()
+
+                    let completed = gitProcess.WaitForExit(5000) // 5 second timeout
+
+                    if completed then
+                        let outputStr = output.ToString().Trim()
+                        let errorStr = error.ToString().Trim()
+
+                        if gitProcess.ExitCode = 0 && not (String.IsNullOrEmpty(outputStr)) then
+                            (true, outputStr)
+                        else
+                            (false, if String.IsNullOrEmpty(errorStr) then "Unable to determine branch" else errorStr)
+                    else
+                        gitProcess.Kill()
+                        (false, "Git branch command timed out")
+                else
+                    (false, "Failed to start git branch process")
+        with ex ->
+            (false, $"Exception: {ex.Message}")
+
+    /// Checks if the current branch is master or main
+    let isOnMainBranch (folderPath: string) : (bool * string * bool) =
+        let (success, branchName) = getCurrentBranch folderPath
+        if success then
+            let isMainBranch = branchName = "master" || branchName = "main"
+            (true, branchName, isMainBranch)
+        else
+            (false, branchName, false)
 
     /// Extract repository name from a git URL
     /// Parses the last segment of the URL path, removing .git extension if present

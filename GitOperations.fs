@@ -78,7 +78,8 @@ module GitOperations =
             printfn "Checking %d repositories for pull eligibility..." repoInfos.Length
 
             let messageQueue = ConcurrentQueue<PullMessage>()
-            let mutable pullCount = 0
+            let mutable successCount = 0
+            let mutable failureCount = 0
             let mutable skippedCount = 0
 
             // Filter repos that need pulling
@@ -87,108 +88,119 @@ module GitOperations =
                 |> List.choose (fun repoInfo ->
                     match repoInfo.RemoteUrl with
                     | Some url ->
-                        let cachedRepo = GitCache.getCachedRepo repoInfo.Path
-                        let shouldPull = 
-                            match cachedRepo with
-                            | Some cached -> GitCache.shouldAttemptPull cached.LastPullAttempt
-                            | None -> true
-
-                        if shouldPull then
-                            Some (repoInfo, url, cachedRepo)
-                        else
-                            let timeSinceLastAttempt = 
-                                match cachedRepo with
-                                | Some cached ->
-                                    match cached.LastPullAttempt with
-                                    | Some lastAttempt ->
-                                        let elapsed = DateTime.UtcNow - lastAttempt
-                                        sprintf "%.1f minutes ago" elapsed.TotalMinutes
-                                    | None -> "never"
-                                | None -> "never"
-                            
-                            messageQueue.Enqueue(PullSkipped(repoInfo.RepoName, $"last attempt: {timeSinceLastAttempt}"))
+                        // Check blacklist first
+                        if BlacklistConfig.shouldExcludeFromPull repoInfo.RepoName repoInfo.Path then
+                            let reason = BlacklistConfig.getPullBlacklistReason repoInfo.RepoName repoInfo.Path
+                            messageQueue.Enqueue(PullSkipped(repoInfo.RepoName, reason |> Option.defaultValue "blacklisted"))
                             None
+                        else
+                            let cachedRepo = GitCache.getCachedRepo repoInfo.Path
+                            let shouldPull = 
+                                match cachedRepo with
+                                | Some cached -> GitCache.shouldAttemptPull cached.LastPullAttempt
+                                | None -> true
+
+                            if shouldPull then
+                                Some (repoInfo, url, cachedRepo)
+                            else
+                                let timeSinceLastAttempt = 
+                                    match cachedRepo with
+                                    | Some cached ->
+                                        match cached.LastPullAttempt with
+                                        | Some lastAttempt ->
+                                            let elapsed = DateTime.UtcNow - lastAttempt
+                                            sprintf "%.1f minutes ago" elapsed.TotalMinutes
+                                        | None -> "never"
+                                    | None -> "never"
+                                
+                                messageQueue.Enqueue(PullSkipped(repoInfo.RepoName, $"30-minute cooldown: {timeSinceLastAttempt}"))
+                                None
                     | None ->
                         messageQueue.Enqueue(PullSkipped(repoInfo.RepoName, "no remote URL"))
                         None)
 
-            // Start parallel pull operations
-            let pullTasks =
+            // Limit concurrency to prevent overwhelming the system - process in batches of 5
+            let batchSize = 5
+            let batches = 
                 reposToProcess
-                |> List.map (fun (repoInfo, url, cachedRepo) ->
-                    Task.Run(fun () ->
-                        try
-                            messageQueue.Enqueue(PullStarted(repoInfo.RepoName, repoInfo.Path))
+                |> List.chunkBySize batchSize
 
-                            // Update cache with attempt timestamp BEFORE trying pull
-                            let cacheEntry = {
-                                Path = repoInfo.Path
-                                RepoName = repoInfo.RepoName
-                                RepoUrl = url
-                                LastPullAttempt = Some DateTime.UtcNow
-                                LastSuccessfulPull = cachedRepo |> Option.bind (fun c -> c.LastSuccessfulPull)
-                            }
-                            GitCache.upsertRepo cacheEntry
+            // Process batches sequentially, but repos within each batch in parallel
+            for batch in batches do
+                let pullTasks =
+                    batch
+                    |> List.map (fun (repoInfo, url, cachedRepo) ->
+                        Task.Run(fun () ->
+                            try
+                                messageQueue.Enqueue(PullStarted(repoInfo.RepoName, repoInfo.Path))
 
-                            // Run git pull for this repository
-                            let (pullSuccess, pullError) = GitAdapter.gitPull repoInfo.Path
+                                // Update cache with attempt timestamp BEFORE trying pull
+                                let cacheEntry = {
+                                    Path = repoInfo.Path
+                                    RepoName = repoInfo.RepoName
+                                    RepoUrl = url
+                                    LastPullAttempt = Some DateTime.UtcNow
+                                    LastSuccessfulPull = cachedRepo |> Option.bind (fun c -> c.LastSuccessfulPull)
+                                }
+                                GitCache.upsertRepo cacheEntry
 
-                            if pullSuccess then
-                                GitCache.updateLastSuccessfulPull repoInfo.Path
-                                messageQueue.Enqueue(PullCompleted(repoInfo.RepoName, true, "Pull successful"))
-                            else
-                                messageQueue.Enqueue(PullCompleted(repoInfo.RepoName, false, $"Pull failed: {pullError}"))
-                        with
-                        | ex ->
-                            messageQueue.Enqueue(PullCompleted(repoInfo.RepoName, false, $"Exception: {ex.Message}"))
-                    ))
+                                // Run git pull for this repository
+                                let (pullSuccess, pullError) = GitAdapter.gitPull repoInfo.Path
 
-            // Monitor and display messages while tasks are running
-            let allTasks = Task.WhenAll(pullTasks)
-            let mutable processedCount = 0
-            let totalToProcess = reposToProcess.Length
+                                if pullSuccess then
+                                    GitCache.updateLastSuccessfulPull repoInfo.Path
+                                    messageQueue.Enqueue(PullCompleted(repoInfo.RepoName, true, "Pull successful"))
+                                else
+                                    messageQueue.Enqueue(PullCompleted(repoInfo.RepoName, false, $"Pull failed: {pullError}"))
+                            with
+                            | ex ->
+                                messageQueue.Enqueue(PullCompleted(repoInfo.RepoName, false, $"Exception: {ex.Message}"))
+                        ))
 
-            while not allTasks.IsCompleted || not messageQueue.IsEmpty do
-                let mutable message = Unchecked.defaultof<PullMessage>
-                if messageQueue.TryDequeue(&message) then
-                    match message with
-                    | PullStarted(repoName, path) ->
-                        printfn $"\n🔄 Starting pull for: {repoName}"
-                        printfn $"    Path: {path}"
-                    | PullCompleted(repoName, success, msg) -> 
-                        processedCount <- processedCount + 1
-                        if success then
-                            printfn $"    ✅ {repoName}: {msg}"
-                            pullCount <- pullCount + 1
-                        else
-                            printfn $"    ❌ {repoName}: {msg}"
-                            pullCount <- pullCount + 1
-                    | PullSkipped(repoName, reason) ->
-                        printfn $"⏭️  Skipping {repoName} ({reason})"
-                        skippedCount <- skippedCount + 1
+                // Wait for current batch to complete before starting next batch
+                let batchTask = Task.WhenAll(pullTasks)
                 
-                if not allTasks.IsCompleted then
-                    System.Threading.Thread.Sleep(100) // Brief pause to avoid busy waiting
+                // Monitor messages for this batch
+                while not batchTask.IsCompleted || not messageQueue.IsEmpty do
+                    let mutable message = Unchecked.defaultof<PullMessage>
+                    if messageQueue.TryDequeue(&message) then
+                        match message with
+                        | PullStarted(repoName, path) ->
+                            printfn $"\n🔄 Starting pull for: {repoName}"
+                            printfn $"    Path: {path}"
+                        | PullCompleted(repoName, success, msg) -> 
+                            if success then
+                                printfn $"    ✅ {repoName}: {msg}"
+                                successCount <- successCount + 1
+                            else
+                                printfn $"    ❌ {repoName}: {msg}"
+                                failureCount <- failureCount + 1
+                        | PullSkipped(repoName, reason) ->
+                            printfn $"⏭️  Skipping {repoName} ({reason})"
+                            skippedCount <- skippedCount + 1
+                    
+                    if not batchTask.IsCompleted then
+                        System.Threading.Thread.Sleep(100)
 
-            // Process any remaining messages
+                // Wait for batch to complete
+                batchTask.Wait()
+
+            // Process any remaining messages from initial filtering
             while not messageQueue.IsEmpty do
                 let mutable message = Unchecked.defaultof<PullMessage>
                 if messageQueue.TryDequeue(&message) then
                     match message with
-                    | PullStarted(repoName, path) ->
-                        printfn $"\n🔄 Starting pull for: {repoName}"
-                    | PullCompleted(repoName, success, msg) -> 
-                        if success then
-                            printfn $"    ✅ {repoName}: {msg}"
-                            pullCount <- pullCount + 1
-                        else
-                            printfn $"    ❌ {repoName}: {msg}"
-                            pullCount <- pullCount + 1
                     | PullSkipped(repoName, reason) ->
                         printfn $"⏭️  Skipping {repoName} ({reason})"
                         skippedCount <- skippedCount + 1
+                    | _ -> () // Should not happen at this stage
 
-            printfn "\nParallel git pull operations completed: %d attempted, %d skipped (30-minute cooldown)" pullCount skippedCount
+            let totalAttempted = successCount + failureCount
+            printfn $"\nParallel git pull operations completed:"
+            printfn $"  ✅ Successful: {successCount}"
+            printfn $"  ❌ Failed: {failureCount}"  
+            printfn $"  ⏭️  Skipped: {skippedCount}"
+            printfn $"  📊 Total Attempted: {totalAttempted} of {repoInfos.Length} repositories"
         else
             printfn "\n💡 Use --pull-repos flag to perform git pull operations on all repositories"
 

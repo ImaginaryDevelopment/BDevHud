@@ -38,6 +38,11 @@ module SearchOperations =
                         let repoName = RepositoryDiscovery.getFileName repoPath
                         printfn "\n📁 Repository: %s (%d file(s))" repoName filesInRepo.Length
                         
+                        // Check current branch and display warning if not on master/main
+                        let (branchSuccess, branchName, isMainBranch) = GitAdapter.isOnMainBranch repoPath
+                        if branchSuccess && not isMainBranch then
+                            printfn "    ⚠️  Branch warning: Currently on '%s' (not master/main)" branchName
+                        
                         // Get last successful pull information
                         let cachedRepo = GitCache.getCachedRepo repoPath
                         match cachedRepo with
