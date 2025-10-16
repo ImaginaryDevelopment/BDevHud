@@ -24,6 +24,16 @@ module CommandLineArgs =
         let args = getArgs ()
         args |> Array.contains "--index-files" || args |> Array.contains "--index"
 
+    /// Check if Octopus Deploy integration should be performed
+    let shouldRunOctopus () =
+        let args = getArgs ()
+        args |> Array.contains "--octopus"
+
+    /// Check if GitHub integration should be performed
+    let shouldRunGitHub () =
+        let args = getArgs ()
+        args |> Array.contains "--github"
+
     /// Get search term from command line args
     let getSearchTerm () =
         let args = getArgs ()

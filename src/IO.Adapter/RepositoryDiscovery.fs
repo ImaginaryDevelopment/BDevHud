@@ -31,19 +31,27 @@ module RepositoryDiscovery =
 
     /// Spider-search for .git folders under a root directory
     /// If no root directory is provided, searches all local drives
+    /// If the root directory itself has a .git folder, use it directly
     let findGitFolders (rootDirectory: string option) (debugMode: bool) : string array =
         match rootDirectory with
         | Some root ->
             if Directory.Exists(root) then
-                if debugMode then
-                    printfn "Searching for .git folders under: %s" root
-                DirectoryTraversal.traverseDirectories
-                    root
-                    (fun dir -> findGitFoldersInDirectory dir debugMode)
-                    []
-                    (@)
-                    debugMode
-                |> List.toArray
+                // Check if the root directory itself has a .git folder
+                let gitPath = Path.Combine(root, ".git")
+                if Directory.Exists(gitPath) then
+                    if debugMode then
+                        printfn "Found .git folder in root directory: %s" root
+                    [| gitPath |]
+                else
+                    if debugMode then
+                        printfn "Searching for .git folders under: %s" root
+                    DirectoryTraversal.traverseDirectories
+                        root
+                        (fun dir -> findGitFoldersInDirectory dir debugMode)
+                        []
+                        (@)
+                        debugMode
+                    |> List.toArray
             else
                 printfn "Directory does not exist: %s" root
                 [||]

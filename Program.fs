@@ -256,23 +256,21 @@ let main () =
                         printfn "    - Using an older Octopus version without spaces"
                         printfn "    - API key lacks permission to list spaces"
                         printfn "    - Need to query default space directly"
-                | Error errorMsg ->
-                    printfn "❌ Connection failed: %s" errorMsg
-                    printfn "💡 This confirms you need to be on the VPN or check network connectivity"
 
-                // Get projects
-                printfn "🔍 Querying projects..."
-                let targetSpace = spaceId |> Option.defaultValue "Default"
-                let projectApiUrl = 
-                    if spaceId.IsSome then 
-                        sprintf "%s/api/%s/projects" baseUrl spaceId.Value
-                    else 
-                        sprintf "%s/api/projects" baseUrl
-                printfn "    Making API call to: %s" projectApiUrl
+                    // Get projects (only if connection was successful)
+                    printfn "🔍 Querying projects..."
+                    let targetSpace = spaceId |> Option.defaultValue "Default"
+                    let projectApiUrl = 
+                        if spaceId.IsSome then 
+                            sprintf "%s/api/%s/projects" baseUrl spaceId.Value
+                        else 
+                            sprintf "%s/api/projects" baseUrl
+                    printfn "    Making API call to: %s" projectApiUrl
 
-                let gitRepos = GitOperations.getCachedRepositories()
-                let projects = OctopusClient.getProjectsWithGitInfo config gitRepos |> Async.AwaitTask |> Async.RunSynchronously
-                printfn "📋 Found %d Octopus project(s):" projects.Length
+                    let gitRepos = GitOperations.getCachedRepositories()
+                    let projects = OctopusClient.getProjectsWithGitInfo config gitRepos |> Async.AwaitTask |> Async.RunSynchronously
+                    
+                    printfn "📋 Found %d Octopus project(s):" projects.Length
                 if projects.Length = 0 then
                     printfn "    No projects found in the target space."
                     if spaceId.IsSome then

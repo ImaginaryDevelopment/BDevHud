@@ -563,7 +563,7 @@ module FileIndex =
                         let relativePath = Path.GetRelativePath(repoPath, filePath)
                         printfn $"⚠️  WARNING: Large file with {trigrams.Length:N0} trigrams in {Path.GetFileName(repoPath)}/{relativePath}"
                     
-                    printfn $"Indexed {fileType} file: {Path.GetFileName(filePath)} ({trigrams.Length} trigrams)"
+                    printfn $"Indexed: {Path.GetFileName(filePath)}"
         with
         | ex ->
             printfn $"Error indexing file {filePath}: {ex.Message}"

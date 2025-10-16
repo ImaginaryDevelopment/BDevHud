@@ -46,19 +46,9 @@ module FileIndexingOperations =
                         printfn "    Found %d indexable files" indexableFiles.Length
 
                         if indexableFiles.Length > 0 then
-                            // Index each file with detailed logging
-                            let mutable fileIndex = 0
-                            for (filePath, fileType) in indexableFiles do
-                                fileIndex <- fileIndex + 1
-                                let fileName = RepositoryDiscovery.getFileName filePath
-                                let fileSizeBytes = RepositoryDiscovery.getFileInfo filePath
-                                let fileSizeKB = fileSizeBytes / 1024L
-                                printfn "    [%d/%d] Starting file: %s (%s, %d KB)" fileIndex indexableFiles.Length fileName fileType fileSizeKB
-                                
-                            // Index the repository
+                            // Index the repository (FileIndex handles file display and filtering internally)
                             FileIndex.indexRepository repoInfo.Path
                             totalFilesIndexed <- totalFilesIndexed + indexableFiles.Length
-                            printfn "    ✅ Indexed %d files" indexableFiles.Length
                         else
                             printfn "    ⚠️ No Terraform or PowerShell files found"
                     with
