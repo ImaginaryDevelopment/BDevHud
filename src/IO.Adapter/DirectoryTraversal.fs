@@ -6,6 +6,36 @@ open System.IO
 /// Generic directory traversal functionality with robust error handling
 module DirectoryTraversal =
 
+    /// Directory patterns to exclude during traversal (commonly ignored folders)
+    let private directoryBlacklist = [
+        "node_modules";
+        "bin";
+        "obj";
+        ".git";
+        ".vs";
+        ".vscode";
+        "packages";
+        ".nuget";
+        "node_modules";
+        "target";
+        "build";
+        ".gradle";
+        ".mvn";
+        "__pycache__";
+        ".pytest_cache";
+        "venv";
+        ".venv";
+        "env";
+        ".env";
+    ]
+
+    /// Check if a directory should be skipped during traversal
+    let private shouldSkipDirectory (directoryPath: string) : bool =
+        let dirName = Path.GetFileName(directoryPath).ToLowerInvariant()
+        directoryBlacklist
+        |> List.exists (fun pattern -> 
+            dirName.Contains(pattern.ToLowerInvariant(), System.StringComparison.OrdinalIgnoreCase))
+
     /// Traverses directories recursively, applying a function to each directory
     /// and accumulating results. Handles errors gracefully without stopping the traversal.
     ///
@@ -38,7 +68,11 @@ module DirectoryTraversal =
 
             for subdir in subdirs do
                 try
-                    currentResults <- traverseDirectories subdir folderProcessor currentResults resultCombiner debugMode
+                    // Skip blacklisted directories to improve performance and avoid unnecessary traversal
+                    if shouldSkipDirectory subdir then
+                        if debugMode then printfn $"Skipping blacklisted directory: {subdir}"
+                    else
+                        currentResults <- traverseDirectories subdir folderProcessor currentResults resultCombiner debugMode
                 with
                 | :? UnauthorizedAccessException -> if debugMode then printfn $"Access denied: {subdir}"
                 | :? DirectoryNotFoundException -> if debugMode then printfn $"Directory not found: {subdir}"

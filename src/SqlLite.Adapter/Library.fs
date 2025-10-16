@@ -3,6 +3,8 @@ namespace SqlLite.Adapter
 open System
 open System.IO
 open System.Text.RegularExpressions
+open System.Threading.Tasks
+open System.Collections.Concurrent
 open Microsoft.Data.Sqlite
 
 // Repository information for caching
@@ -369,14 +371,25 @@ module FileIndex =
         use command4 = new SqliteCommand(createFilePathIndexCommand, connection)
         command4.ExecuteNonQuery() |> ignore
     
-    // Generate trigrams from text
+    // Generate trigrams from text with parallel processing for large texts
     let private generateTrigrams (text: string) : (string * int) list =
         if text.Length < 3 then []
         else
             let normalizedText = text.ToLowerInvariant()
-            [0..normalizedText.Length-3]
-            |> List.map (fun i -> normalizedText.Substring(i, 3), i)
-            |> List.distinct
+            let length = normalizedText.Length
+            
+            if length > 10000 then
+                // Use parallel processing for large texts
+                [0..length-3]
+                |> Array.ofList
+                |> Array.Parallel.map (fun i -> normalizedText.Substring(i, 3), i)
+                |> Array.toList
+                |> List.distinct
+            else
+                // Use sequential processing for smaller texts
+                [0..length-3]
+                |> List.map (fun i -> normalizedText.Substring(i, 3), i)
+                |> List.distinct
     
     // Check if file should be indexed (terraform or powershell)
     let private shouldIndexFile (filePath: string) : string option =
@@ -444,8 +457,11 @@ module FileIndex =
                 let lastModified = fileInfo.LastWriteTimeUtc
                 let fileSize = fileInfo.Length
                 
+                // Skip 0KB files
+                if fileSize = 0L then
+                    printfn $"Skipping 0KB file: {Path.GetFileName(filePath)}"
                 // Check if file needs reindexing based on timestamp
-                if not (needsReindexing repoPath filePath lastModified) then
+                elif not (needsReindexing repoPath filePath lastModified) then
                     printfn $"Skipping unchanged file: {Path.GetFileName(filePath)}"
                 else
                     let content = File.ReadAllText(filePath)
@@ -497,20 +513,55 @@ module FileIndex =
                     deleteCommand.Parameters.AddWithValue("@file_id", fileId) |> ignore
                     deleteCommand.ExecuteNonQuery() |> ignore
                     
-                    // Generate and insert trigrams
+                    // Generate trigrams in parallel and queue SQL inserts
                     let trigrams = generateTrigrams content
                     
-                    for (trigram, position) in trigrams do
-                        let insertTrigramCommand = """
-                            INSERT INTO trigrams (trigram, file_id, position)
-                            VALUES (@trigram, @file_id, @position)
-                        """
+                    // Use batch insert for better performance with large trigram counts
+                    if trigrams.Length > 1000 then
+                        // For large files, use batch processing to avoid memory issues
+                        let batchSize = 1000
+                        let batches = 
+                            trigrams 
+                            |> List.chunkBySize batchSize
                         
-                        use trigramCommand = new SqliteCommand(insertTrigramCommand, connection)
-                        trigramCommand.Parameters.AddWithValue("@trigram", trigram) |> ignore
-                        trigramCommand.Parameters.AddWithValue("@file_id", fileId) |> ignore
-                        trigramCommand.Parameters.AddWithValue("@position", position) |> ignore
-                        trigramCommand.ExecuteNonQuery() |> ignore
+                        for batch in batches do
+                            use transaction = connection.BeginTransaction()
+                            try
+                                for (trigram, position) in batch do
+                                    let insertTrigramCommand = """
+                                        INSERT INTO trigrams (trigram, file_id, position)
+                                        VALUES (@trigram, @file_id, @position)
+                                    """
+                                    
+                                    use trigramCommand = new SqliteCommand(insertTrigramCommand, connection, transaction)
+                                    trigramCommand.Parameters.AddWithValue("@trigram", trigram) |> ignore
+                                    trigramCommand.Parameters.AddWithValue("@file_id", fileId) |> ignore
+                                    trigramCommand.Parameters.AddWithValue("@position", position) |> ignore
+                                    trigramCommand.ExecuteNonQuery() |> ignore
+                                
+                                transaction.Commit()
+                            with
+                            | ex -> 
+                                transaction.Rollback()
+                                raise ex
+                    else
+                        // For smaller files, process normally
+                        for (trigram, position) in trigrams do
+                            let insertTrigramCommand = """
+                                INSERT INTO trigrams (trigram, file_id, position)
+                                VALUES (@trigram, @file_id, @position)
+                            """
+                            
+                            use trigramCommand = new SqliteCommand(insertTrigramCommand, connection)
+                            trigramCommand.Parameters.AddWithValue("@trigram", trigram) |> ignore
+                            trigramCommand.Parameters.AddWithValue("@file_id", fileId) |> ignore
+                            trigramCommand.Parameters.AddWithValue("@position", position) |> ignore
+                            trigramCommand.ExecuteNonQuery() |> ignore
+                    
+                    // Check for large trigram count and display warning
+                    if trigrams.Length > 5000 then
+                        let relativePath = Path.GetRelativePath(repoPath, filePath)
+                        printfn $"⚠️  WARNING: Large file with {trigrams.Length:N0} trigrams in {Path.GetFileName(repoPath)}/{relativePath}"
                     
                     printfn $"Indexed {fileType} file: {Path.GetFileName(filePath)} ({trigrams.Length} trigrams)"
         with
