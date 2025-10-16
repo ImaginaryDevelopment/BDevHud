@@ -402,6 +402,38 @@ module FileIndex =
             printfn $"Error scanning files in {repoPath}: {ex.Message}"
             []
     
+    // Check if a file needs to be reindexed based on last modified timestamp
+    let private needsReindexing (repoPath: string) (filePath: string) (currentLastModified: DateTime) : bool =
+        try
+            initializeDatabase()
+            
+            use connection = new SqliteConnection($"Data Source={dbPath}")
+            connection.Open()
+            
+            let checkQuery = """
+                SELECT last_modified FROM indexed_files 
+                WHERE repo_path = @repo_path AND file_path = @file_path
+            """
+            
+            use command = new SqliteCommand(checkQuery, connection)
+            command.Parameters.AddWithValue("@repo_path", repoPath) |> ignore
+            command.Parameters.AddWithValue("@file_path", filePath) |> ignore
+            
+            use reader = command.ExecuteReader()
+            
+            if reader.Read() then
+                let storedLastModified = DateTime.Parse(reader.["last_modified"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                // File needs reindexing if current timestamp is newer than stored timestamp
+                currentLastModified > storedLastModified
+            else
+                // File not in database, needs indexing
+                true
+        with
+        | ex ->
+            printfn $"Error checking if file needs reindexing {filePath}: {ex.Message}"
+            // If there's an error, assume it needs reindexing to be safe
+            true
+
     // Index a single file
     let indexFile (repoPath: string) (filePath: string) (fileType: string) : unit =
         try
@@ -409,88 +441,104 @@ module FileIndex =
                 printfn $"File not found: {filePath}"
             else
                 let fileInfo = FileInfo(filePath)
-                let content = File.ReadAllText(filePath)
                 let lastModified = fileInfo.LastWriteTimeUtc
                 let fileSize = fileInfo.Length
                 
-                initializeDatabase()
-                
-                use connection = new SqliteConnection($"Data Source={dbPath}")
-                connection.Open()
-                
-                // Insert or update file
-                let upsertFileCommand = """
-                    INSERT INTO indexed_files (repo_path, file_path, file_type, content, last_modified, file_size, updated_at)
-                    VALUES (@repo_path, @file_path, @file_type, @content, @last_modified, @file_size, @updated_at)
-                    ON CONFLICT(repo_path, file_path) DO UPDATE SET
-                        content = excluded.content,
-                        last_modified = excluded.last_modified,
-                        file_size = excluded.file_size,
-                        updated_at = excluded.updated_at
-                """
-                
-                use fileCommand = new SqliteCommand(upsertFileCommand, connection)
-                fileCommand.Parameters.AddWithValue("@repo_path", repoPath) |> ignore
-                fileCommand.Parameters.AddWithValue("@file_path", filePath) |> ignore
-                fileCommand.Parameters.AddWithValue("@file_type", fileType) |> ignore
-                fileCommand.Parameters.AddWithValue("@content", content) |> ignore
-                fileCommand.Parameters.AddWithValue("@last_modified", lastModified.ToString("O")) |> ignore
-                fileCommand.Parameters.AddWithValue("@file_size", fileSize) |> ignore
-                fileCommand.Parameters.AddWithValue("@updated_at", DateTime.UtcNow.ToString("O")) |> ignore
-                
-                fileCommand.ExecuteNonQuery() |> ignore
-                
-                // Get the file ID
-                let getFileIdCommand = """
-                    SELECT id FROM indexed_files WHERE repo_path = @repo_path AND file_path = @file_path
-                """
-                
-                use getIdCommand = new SqliteCommand(getFileIdCommand, connection)
-                getIdCommand.Parameters.AddWithValue("@repo_path", repoPath) |> ignore
-                getIdCommand.Parameters.AddWithValue("@file_path", filePath) |> ignore
-                
-                let fileId = getIdCommand.ExecuteScalar() :?> int64 |> int
-                
-                // Delete existing trigrams for this file
-                let deleteTrigramsCommand = """
-                    DELETE FROM trigrams WHERE file_id = @file_id
-                """
-                
-                use deleteCommand = new SqliteCommand(deleteTrigramsCommand, connection)
-                deleteCommand.Parameters.AddWithValue("@file_id", fileId) |> ignore
-                deleteCommand.ExecuteNonQuery() |> ignore
-                
-                // Generate and insert trigrams
-                let trigrams = generateTrigrams content
-                
-                for (trigram, position) in trigrams do
-                    let insertTrigramCommand = """
-                        INSERT INTO trigrams (trigram, file_id, position)
-                        VALUES (@trigram, @file_id, @position)
+                // Check if file needs reindexing based on timestamp
+                if not (needsReindexing repoPath filePath lastModified) then
+                    printfn $"Skipping unchanged file: {Path.GetFileName(filePath)}"
+                else
+                    let content = File.ReadAllText(filePath)
+                    
+                    initializeDatabase()
+                    
+                    use connection = new SqliteConnection($"Data Source={dbPath}")
+                    connection.Open()
+                    
+                    // Insert or update file
+                    let upsertFileCommand = """
+                        INSERT INTO indexed_files (repo_path, file_path, file_type, content, last_modified, file_size, updated_at)
+                        VALUES (@repo_path, @file_path, @file_type, @content, @last_modified, @file_size, @updated_at)
+                        ON CONFLICT(repo_path, file_path) DO UPDATE SET
+                            content = excluded.content,
+                            last_modified = excluded.last_modified,
+                            file_size = excluded.file_size,
+                            updated_at = excluded.updated_at
                     """
                     
-                    use trigramCommand = new SqliteCommand(insertTrigramCommand, connection)
-                    trigramCommand.Parameters.AddWithValue("@trigram", trigram) |> ignore
-                    trigramCommand.Parameters.AddWithValue("@file_id", fileId) |> ignore
-                    trigramCommand.Parameters.AddWithValue("@position", position) |> ignore
-                    trigramCommand.ExecuteNonQuery() |> ignore
-                
-                printfn $"Indexed {fileType} file: {Path.GetFileName(filePath)} ({trigrams.Length} trigrams)"
+                    use fileCommand = new SqliteCommand(upsertFileCommand, connection)
+                    fileCommand.Parameters.AddWithValue("@repo_path", repoPath) |> ignore
+                    fileCommand.Parameters.AddWithValue("@file_path", filePath) |> ignore
+                    fileCommand.Parameters.AddWithValue("@file_type", fileType) |> ignore
+                    fileCommand.Parameters.AddWithValue("@content", content) |> ignore
+                    fileCommand.Parameters.AddWithValue("@last_modified", lastModified.ToString("O")) |> ignore
+                    fileCommand.Parameters.AddWithValue("@file_size", fileSize) |> ignore
+                    fileCommand.Parameters.AddWithValue("@updated_at", DateTime.UtcNow.ToString("O")) |> ignore
+                    
+                    fileCommand.ExecuteNonQuery() |> ignore
+                    
+                    // Get the file ID
+                    let getFileIdCommand = """
+                        SELECT id FROM indexed_files WHERE repo_path = @repo_path AND file_path = @file_path
+                    """
+                    
+                    use getIdCommand = new SqliteCommand(getFileIdCommand, connection)
+                    getIdCommand.Parameters.AddWithValue("@repo_path", repoPath) |> ignore
+                    getIdCommand.Parameters.AddWithValue("@file_path", filePath) |> ignore
+                    
+                    let fileId = getIdCommand.ExecuteScalar() :?> int64 |> int
+                    
+                    // Delete existing trigrams for this file
+                    let deleteTrigramsCommand = """
+                        DELETE FROM trigrams WHERE file_id = @file_id
+                    """
+                    
+                    use deleteCommand = new SqliteCommand(deleteTrigramsCommand, connection)
+                    deleteCommand.Parameters.AddWithValue("@file_id", fileId) |> ignore
+                    deleteCommand.ExecuteNonQuery() |> ignore
+                    
+                    // Generate and insert trigrams
+                    let trigrams = generateTrigrams content
+                    
+                    for (trigram, position) in trigrams do
+                        let insertTrigramCommand = """
+                            INSERT INTO trigrams (trigram, file_id, position)
+                            VALUES (@trigram, @file_id, @position)
+                        """
+                        
+                        use trigramCommand = new SqliteCommand(insertTrigramCommand, connection)
+                        trigramCommand.Parameters.AddWithValue("@trigram", trigram) |> ignore
+                        trigramCommand.Parameters.AddWithValue("@file_id", fileId) |> ignore
+                        trigramCommand.Parameters.AddWithValue("@position", position) |> ignore
+                        trigramCommand.ExecuteNonQuery() |> ignore
+                    
+                    printfn $"Indexed {fileType} file: {Path.GetFileName(filePath)} ({trigrams.Length} trigrams)"
         with
         | ex ->
             printfn $"Error indexing file {filePath}: {ex.Message}"
     
-    // Index all files in a repository
+    // Index all files in a repository with performance tracking
     let indexRepository (repoPath: string) : unit =
         try
             printfn $"Indexing repository: {repoPath}"
             let files = getIndexableFiles repoPath
             printfn $"Found {files.Length} indexable files"
             
+            let mutable indexedCount = 0
+            let mutable skippedCount = 0
+            
             for (filePath, fileType) in files do
-                indexFile repoPath filePath fileType
+                let fileInfo = FileInfo(filePath)
+                let lastModified = fileInfo.LastWriteTimeUtc
+                
+                if needsReindexing repoPath filePath lastModified then
+                    indexFile repoPath filePath fileType
+                    indexedCount <- indexedCount + 1
+                else
+                    skippedCount <- skippedCount + 1
             
             printfn $"Completed indexing repository: {repoPath}"
+            printfn $"  📊 Statistics: {indexedCount} indexed, {skippedCount} skipped (unchanged)"
         with
         | ex ->
             printfn $"Error indexing repository {repoPath}: {ex.Message}"
@@ -550,8 +598,124 @@ module FileIndex =
                 List.rev results
         with
         | ex ->
-            printfn $"Error searching text '{searchTerm}': {ex.Message}"
+            printfn $"Error searching text: {ex.Message}"
             []
+
+    // Get indexing statistics
+    let getIndexingStats () : unit =
+        try
+            initializeDatabase()
+            
+            use connection = new SqliteConnection($"Data Source={dbPath}")
+            connection.Open()
+            
+            // Get file counts by type
+            let fileStatsQuery = """
+                SELECT 
+                    file_type,
+                    COUNT(*) as file_count,
+                    SUM(file_size) as total_size,
+                    MIN(last_modified) as oldest_file,
+                    MAX(last_modified) as newest_file
+                FROM indexed_files 
+                GROUP BY file_type
+                ORDER BY file_count DESC
+            """
+            
+            use fileStatsCommand = new SqliteCommand(fileStatsQuery, connection)
+            use reader = fileStatsCommand.ExecuteReader()
+            
+            printfn "\n📊 File Indexing Statistics:"
+            printfn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            
+            let mutable totalFiles = 0
+            let mutable totalSize = 0L
+            
+            while reader.Read() do
+                let fileType = reader.["file_type"] :?> string
+                let fileCount = reader.["file_count"] :?> int64 |> int
+                let totalSizeBytes = reader.["total_size"] :?> int64
+                let oldestFile = reader.["oldest_file"] :?> string
+                let newestFile = reader.["newest_file"] :?> string
+                
+                let sizeInMB = float totalSizeBytes / (1024.0 * 1024.0)
+                
+                printfn "📄 %s Files: %s files, %.2f MB" (fileType.ToUpper()) (fileCount.ToString("N0")) sizeInMB
+                let oldestDateTime = DateTime.Parse(oldestFile, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                let newestDateTime = DateTime.Parse(newestFile, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                printfn "   Oldest: %s" (oldestDateTime.ToString("yyyy-MM-dd HH:mm"))
+                printfn "   Newest: %s" (newestDateTime.ToString("yyyy-MM-dd HH:mm"))
+                
+                totalFiles <- totalFiles + fileCount
+                totalSize <- totalSize + totalSizeBytes
+            
+            reader.Close()
+            
+            // Get trigram statistics
+            let trigramStatsQuery = """
+                SELECT COUNT(*) as trigram_count FROM trigrams
+            """
+            
+            use trigramStatsCommand = new SqliteCommand(trigramStatsQuery, connection)
+            let trigramCount = trigramStatsCommand.ExecuteScalar() :?> int64 |> int
+            
+            // Get repository statistics
+            let repoStatsQuery = """
+                SELECT COUNT(DISTINCT repo_path) as repo_count FROM indexed_files
+            """
+            
+            use repoStatsCommand = new SqliteCommand(repoStatsQuery, connection)
+            let repoCount = repoStatsCommand.ExecuteScalar() :?> int64 |> int
+            
+            let totalSizeInMB = float totalSize / (1024.0 * 1024.0)
+            
+            printfn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            printfn "📈 Total: %s files from %s repositories (%.2f MB)" (totalFiles.ToString("N0")) (repoCount.ToString("N0")) totalSizeInMB
+            printfn "🔍 Search Index: %s trigrams" (trigramCount.ToString("N0"))
+            printfn "💾 Database: %s" dbPath
+            
+        with
+        | ex ->
+            printfn $"Error getting indexing statistics: {ex.Message}"
+
+    // Clean up orphaned trigrams and show cleanup statistics
+    let cleanupDatabase () : unit =
+        try
+            initializeDatabase()
+            
+            use connection = new SqliteConnection($"Data Source={dbPath}")
+            connection.Open()
+            
+            // Count orphaned trigrams before cleanup
+            let countOrphanedQuery = """
+                SELECT COUNT(*) FROM trigrams t 
+                LEFT JOIN indexed_files f ON t.file_id = f.id 
+                WHERE f.id IS NULL
+            """
+            
+            use countCommand = new SqliteCommand(countOrphanedQuery, connection)
+            let orphanedBefore = countCommand.ExecuteScalar() :?> int64 |> int
+            
+            // Remove orphaned trigrams
+            let cleanupQuery = """
+                DELETE FROM trigrams 
+                WHERE file_id NOT IN (SELECT id FROM indexed_files)
+            """
+            
+            use cleanupCommand = new SqliteCommand(cleanupQuery, connection)
+            let deletedRows = cleanupCommand.ExecuteNonQuery()
+            
+            // Vacuum the database to reclaim space
+            let vacuumCommand = new SqliteCommand("VACUUM", connection)
+            vacuumCommand.ExecuteNonQuery() |> ignore
+            
+            printfn "🧹 Database cleanup completed:"
+            printfn "   Removed %d orphaned trigram entries" deletedRows
+            printfn "   Database compacted and optimized"
+            
+        with
+        | ex ->
+            printfn $"Error cleaning up database: {ex.Message}"
     
     // Get all indexed files for a repository
     let getIndexedFilesForRepo (repoPath: string) : IndexedFile list =

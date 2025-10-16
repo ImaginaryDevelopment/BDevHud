@@ -62,10 +62,20 @@ module CommandLineArgs =
                     printfn "No root directory specified. Searching all local drives."
                     None
 
+    /// Check if indexing statistics should be shown
+    let shouldShowIndexStats () =
+        let args = getArgs ()
+        args |> Array.contains "--index-stats" || args |> Array.contains "--stats"
+
+    /// Check if database cleanup should be performed
+    let shouldCleanupDatabase () =
+        let args = getArgs ()
+        args |> Array.contains "--cleanup-db" || args |> Array.contains "--cleanup"
+
     /// Check if we should skip git operations (search-only mode)
     let shouldSkipGitOperations () =
         match getSearchTerm() with
         | Some _ -> 
             // Only skip git ops if ONLY searching (no other operations requested)
-            not (shouldPullRepos() || shouldIndexFiles())
+            not (shouldPullRepos() || shouldIndexFiles() || shouldShowIndexStats() || shouldCleanupDatabase())
         | None -> false

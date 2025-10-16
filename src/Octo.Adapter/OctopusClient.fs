@@ -257,14 +257,66 @@ module OctopusClient =
                     let deploymentProcess = repository.DeploymentProcesses.Get(project.DeploymentProcessId)
                     let projectVariables = repository.VariableSets.Get(project.VariableSetId)
                     
+                    // DIAGNOSTIC: Explore deployment process properties
+                    printfn "\n🔍 DIAGNOSTIC: Deployment Process for '%s'" projectName
+                    printfn "  📋 Process ID: %s" deploymentProcess.Id
+                    printfn "  📊 Process Version: %d" deploymentProcess.Version
+                    printfn "  📝 Steps Count: %d" deploymentProcess.Steps.Count
+                    
+                    // DIAGNOSTIC: Explore project properties for git links
+                    printfn "\n🔍 DIAGNOSTIC: Project Properties"
+                    printfn "  🏷️  Project ID: %s" project.Id
+                    printfn "  📂 Project Slug: %s" project.Slug
+                    printfn "  🔗 Project Connectivity Policy: %s" (if isNull project.ProjectConnectivityPolicy then "null" else project.ProjectConnectivityPolicy.ToString())
+                    if not (isNull project.PersistenceSettings) then
+                        printfn "  💾 Persistence Settings Type: %s" (project.PersistenceSettings.GetType().Name)
+                        printfn "  💾 Persistence Settings: %s" (project.PersistenceSettings.ToString())
+                    
                     let steps = 
                         deploymentProcess.Steps
                         |> Seq.mapi (fun index step ->
                             let actions = step.Actions |> List.ofSeq
                             
+                            // DIAGNOSTIC: Explore step properties
+                            printfn "\n  🔍 DIAGNOSTIC: Step %d - '%s'" (index + 1) step.Name
+                            printfn "    📋 Step ID: %s" step.Id
+                            printfn "    🎬 Actions Count: %d" actions.Length
+                            printfn "    ⚙️  Step Properties Count: %d" step.Properties.Count
+                            
+                            // DIAGNOSTIC: Show all step-level properties
+                            if step.Properties.Count > 0 then
+                                printfn "    📝 Step Properties:"
+                                for kvp in step.Properties do
+                                    printfn "      - %s: %s" kvp.Key (if kvp.Value = null then "null" else kvp.Value.ToString())
+                            
                             // Get the primary action (usually the first one)
                             match actions with
                             | action :: _ ->
+                                // DIAGNOSTIC: Explore action properties for git links
+                                printfn "    🔍 DIAGNOSTIC: Action Properties"
+                                printfn "      🎯 Action Type: %s" action.ActionType
+                                printfn "      🏷️  Action Name: %s" action.Name
+                                printfn "      📊 Properties Count: %d" action.Properties.Count
+                                
+                                // DIAGNOSTIC: Look for git-related properties
+                                let gitRelatedProperties = 
+                                    action.Properties 
+                                    |> Seq.filter (fun kvp -> 
+                                        let key = kvp.Key.ToLower()
+                                        key.Contains("git") || key.Contains("repository") || key.Contains("source") || key.Contains("scm"))
+                                    |> List.ofSeq
+                                
+                                if gitRelatedProperties.Length > 0 then
+                                    printfn "      🔗 Git-Related Properties Found:"
+                                    for kvp in gitRelatedProperties do
+                                        printfn "        - %s: %s" kvp.Key kvp.Value.Value
+                                
+                                // DIAGNOSTIC: Show ALL action properties for comprehensive analysis
+                                printfn "      📝 All Action Properties:"
+                                for kvp in action.Properties do
+                                    let valueStr = if String.IsNullOrEmpty(kvp.Value.Value) then "(empty)" else kvp.Value.Value
+                                    printfn "        - %s: %s" kvp.Key valueStr
+                                
                                 let powerShellScript = 
                                     if action.Properties.ContainsKey("Octopus.Action.Script.ScriptBody") then
                                         Some (action.Properties.["Octopus.Action.Script.ScriptBody"].Value)
@@ -307,6 +359,7 @@ module OctopusClient =
                                   Variables = stepVariables
                                   Properties = properties }
                             | [] ->
+                                printfn "    ⚠️  No actions found for step '%s'" step.Name
                                 { Name = step.Name
                                   StepNumber = index + 1
                                   StepId = step.Id
@@ -333,6 +386,33 @@ module OctopusClient =
                 if isNull template then
                     return Error $"Step template '{templateId}' not found"
                 else
+                    // DIAGNOSTIC: Explore step template properties
+                    printfn "\n🔍 DIAGNOSTIC: Step Template '%s' (ID: %s)" template.Name templateId
+                    printfn "  📊 Properties Count: %d" template.Properties.Count
+                    printfn "  🏷️  Template Version: %d" template.Version
+                    printfn "  👤 Last Modified By: %s" (if isNull template.LastModifiedBy then "null" else template.LastModifiedBy)
+                    
+                    // DIAGNOSTIC: Look for ALL git-related properties in step template
+                    let gitRelatedProperties = 
+                        template.Properties 
+                        |> Seq.filter (fun kvp -> 
+                            let key = kvp.Key.ToLower()
+                            key.Contains("git") || key.Contains("repository") || key.Contains("source") || key.Contains("scm") || key.Contains("vcs"))
+                        |> List.ofSeq
+                    
+                    if gitRelatedProperties.Length > 0 then
+                        printfn "  🔗 Git-Related Properties Found:"
+                        for kvp in gitRelatedProperties do
+                            printfn "    - %s: %s" kvp.Key kvp.Value.Value
+                    else
+                        printfn "  ❌ No git-related properties found"
+                    
+                    // DIAGNOSTIC: Show ALL step template properties for comprehensive analysis
+                    printfn "  📝 All Step Template Properties:"
+                    for kvp in template.Properties do
+                        let valueStr = if String.IsNullOrEmpty(kvp.Value.Value) then "(empty)" else kvp.Value.Value
+                        printfn "    - %s: %s" kvp.Key valueStr
+                    
                     let powerShellScript = 
                         if template.Properties.ContainsKey("Octopus.Action.Script.ScriptBody") then
                             Some (template.Properties.["Octopus.Action.Script.ScriptBody"].Value)

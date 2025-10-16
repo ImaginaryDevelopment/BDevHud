@@ -368,6 +368,9 @@ let main () =
             printfn ""
             printfn "Additional Options:"
             printfn "  --pull-repos              Perform git pull on all repositories (moved to end for performance)"
+            printfn "  --index-files             Index Terraform and PowerShell files for fast search"
+            printfn "  --index-stats             Show file indexing statistics and database info"
+            printfn "  --cleanup-db              Clean up orphaned database entries and compact database"
             printfn "  --skip-deployment-steps    Skip deployment step analysis (useful if API key lacks permissions)"
             printfn "  --debug, -d               Enable debug logging (shows access denied and other detailed errors)"
             printfn "  --search-variable <pattern> Search for Octopus variables matching pattern"
@@ -400,6 +403,15 @@ let main () =
 
         // Perform file indexing if requested
         FileIndexingOperations.performFileIndexing repoInfos
+
+        // Show indexing statistics if requested
+        if CommandLineArgs.shouldShowIndexStats() then
+            FileIndex.getIndexingStats()
+        
+        // Cleanup database if requested
+        if CommandLineArgs.shouldCleanupDatabase() then
+            printfn "\n🧹 Performing database cleanup..."
+            FileIndex.cleanupDatabase()
 
     // Perform text search if requested (can work without repoInfos)
     SearchOperations.performTextSearch ()
