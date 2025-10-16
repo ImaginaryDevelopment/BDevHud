@@ -6,6 +6,7 @@ open System.Threading.Tasks
 open IO.Adapter
 open Octo.Adapter
 open GitHub.Adapter
+open SqlLite.Adapter
 open BDevHud
 
 /// Extract repository name from a git URL (wrapper for GitAdapter function)
@@ -30,7 +31,7 @@ let extractRepoName (url: string) : string =
 
 /// Spider-search for .git folders under a root directory
 /// If no root directory is provided, searches all local drives
-let findGitFolders (rootDirectory: string option) =
+let findGitFolders (rootDirectory: string option) (debugMode: bool) =
     /// Processes a directory to find .git folders
     let processDirectoryForGit (dir: string) =
         try
@@ -52,7 +53,7 @@ let findGitFolders (rootDirectory: string option) =
         if Directory.Exists(root) then
             printfn $"Searching for .git folders under: {root}"
 
-            DirectoryTraversal.traverseDirectories root processDirectoryForGit [] combineResults
+            DirectoryTraversal.traverseDirectories root processDirectoryForGit [] combineResults debugMode
             |> List.toArray
         else
             printfn $"Directory does not exist: {root}"
@@ -60,7 +61,7 @@ let findGitFolders (rootDirectory: string option) =
     | None ->
         printfn "Searching all local drives for .git folders..."
 
-        DirectoryTraversal.traverseAllLocalDrives processDirectoryForGit [] combineResults
+        DirectoryTraversal.traverseAllLocalDrives processDirectoryForGit [] combineResults debugMode
         |> List.toArray
 
 /// Represents git repository information
@@ -75,6 +76,11 @@ let shouldPullRepos () =
     let args = Environment.GetCommandLineArgs()
     args |> Array.contains "--pull-repos" || args |> Array.contains "--pull"
 
+// Check if debug logging should be enabled
+let shouldDebugLog () =
+    let args = Environment.GetCommandLineArgs()
+    args |> Array.contains "--debug" || args |> Array.contains "-d"
+
 /// Display results of git folder search with remote information (no git pull by default)
 let displayGitFolders (gitFolders: string[]) : GitRepoInfo list =
     if gitFolders.Length = 0 then
@@ -83,8 +89,6 @@ let displayGitFolders (gitFolders: string[]) : GitRepoInfo list =
     else
         printfn $"\nFound {gitFolders.Length} .git folder(s):"
 
-        // Load existing cache
-        let mutable cache = HudCache.loadCache ()
         let mutable repoInfos = []
 
         gitFolders
@@ -131,17 +135,18 @@ let displayGitFolders (gitFolders: string[]) : GitRepoInfo list =
                 }
                 repoInfos <- repoInfo :: repoInfos
 
-                // Update cache with repository information (without pull date update)
-                let cacheEntry =
-                    { Name = repoName
-                      LastPullDate =
-                        (cache.TryFind(parentDir)
-                         |> Option.map (fun e -> e.LastPullDate)
-                         |> Option.defaultValue "")
-                      FileSystemPath = parentDir
-                      RepoUrl = repoUrl }
-
-                cache <- cache.Add(parentDir, cacheEntry)
+                // Update SQLite cache with repository information (preserve existing pull attempt date)
+                let existingCache = GitCache.getCachedRepo parentDir
+                let cacheEntry = {
+                    Path = parentDir
+                    RepoName = repoName
+                    RepoUrl = repoUrl
+                    LastPullAttempt = 
+                        match existingCache with
+                        | Some existing -> existing.LastPullAttempt
+                        | None -> None
+                }
+                GitCache.upsertRepo cacheEntry
             else
                 printfn "    (no remote configured)"
                 // Add to repo info list even without remote
@@ -152,9 +157,6 @@ let displayGitFolders (gitFolders: string[]) : GitRepoInfo list =
                 }
                 repoInfos <- repoInfo :: repoInfos)
 
-        // Save updated cache
-        HudCache.saveCache cache
-        
         // Return collected repository information
         List.rev repoInfos
 
@@ -164,38 +166,61 @@ let performGitPulls (repoInfos: GitRepoInfo list) =
         printfn "\n%s" (String.replicate 50 "=")
         printfn "Git Pull Operations"
         printfn "%s" (String.replicate 50 "=")
-        printfn $"Pulling {repoInfos.Length} repositories..."
+        printfn $"Checking {repoInfos.Length} repositories for pull eligibility..."
 
-        // Load existing cache for updating pull dates
-        let mutable cache = HudCache.loadCache ()
+        let mutable pullCount = 0
+        let mutable skippedCount = 0
 
         repoInfos
         |> List.iteri (fun i repoInfo ->
-            printfn $"\n[{i + 1}/{repoInfos.Length}] Pulling: {repoInfo.RepoName}"
-            printfn $"    Path: {repoInfo.Path}"
+            match repoInfo.RemoteUrl with
+            | Some url ->
+                // Check cache to see if we should attempt pull (30-minute cooldown)
+                let cachedRepo = GitCache.getCachedRepo repoInfo.Path
+                let shouldPull = 
+                    match cachedRepo with
+                    | Some cached -> GitCache.shouldAttemptPull cached.LastPullAttempt
+                    | None -> true // No cache entry, should attempt
 
-            // Run git pull for this repository
-            let (pullSuccess, pullError) = GitAdapter.gitPull repoInfo.Path
+                if shouldPull then
+                    printfn $"\n[{i + 1}/{repoInfos.Length}] Pulling: {repoInfo.RepoName}"
+                    printfn $"    Path: {repoInfo.Path}"
 
-            if pullSuccess then
-                printfn "    ✅ Pull successful"
-                
-                // Update cache with successful pull date
-                match repoInfo.RemoteUrl with
-                | Some url ->
-                    let cacheEntry =
-                        { Name = repoInfo.RepoName
-                          LastPullDate = DateTime.Now.ToString("yyyyMMdd.HHmmss")
-                          FileSystemPath = repoInfo.Path
-                          RepoUrl = url }
-                    cache <- cache.Add(repoInfo.Path, cacheEntry)
-                | None -> ()
-            else
-                printfn $"    ❌ Pull failed: {pullError}")
+                    // Update cache with attempt timestamp BEFORE trying pull
+                    let cacheEntry = {
+                        Path = repoInfo.Path
+                        RepoName = repoInfo.RepoName
+                        RepoUrl = url
+                        LastPullAttempt = Some DateTime.UtcNow
+                    }
+                    GitCache.upsertRepo cacheEntry
 
-        // Save updated cache
-        HudCache.saveCache cache
-        printfn "\nGit pull operations completed."
+                    // Run git pull for this repository
+                    let (pullSuccess, pullError) = GitAdapter.gitPull repoInfo.Path
+
+                    if pullSuccess then
+                        printfn "    ✅ Pull successful"
+                        pullCount <- pullCount + 1
+                    else
+                        printfn $"    ❌ Pull failed: {pullError}"
+                        pullCount <- pullCount + 1 // Still count as attempted
+                else
+                    let timeSinceLastAttempt = 
+                        match cachedRepo with
+                        | Some cached ->
+                            match cached.LastPullAttempt with
+                            | Some lastAttempt ->
+                                let elapsed = DateTime.UtcNow - lastAttempt
+                                $"{elapsed.TotalMinutes:F1} minutes ago"
+                            | None -> "never"
+                        | None -> "never"
+                    
+                    printfn $"[{i + 1}/{repoInfos.Length}] Skipping {repoInfo.RepoName} (last attempt: {timeSinceLastAttempt})"
+                    skippedCount <- skippedCount + 1
+            | None ->
+                printfn $"[{i + 1}/{repoInfos.Length}] Skipping {repoInfo.RepoName} (no remote URL)")
+
+        printfn $"\nGit pull operations completed: {pullCount} attempted, {skippedCount} skipped (30-minute cooldown)"
     else
         printfn "\n💡 Use --pull-repos flag to perform git pull operations on all repositories"
 
@@ -371,8 +396,8 @@ let displayOctopusProjects (projects: OctopusClient.OctopusProjectWithGit list) 
 
 // Get git repositories from cache for Octopus matching
 let getGitReposFromCache () : (string * string) list =
-    let cache = HudCache.loadCache ()
-    cache.Values |> Seq.map (fun entry -> (entry.Name, entry.RepoUrl)) |> List.ofSeq
+    let cachedRepos = GitCache.getAllCachedRepos ()
+    cachedRepos |> List.map (fun repo -> (repo.RepoName, repo.RepoUrl))
 
 // Display GitHub repositories (simplified for now)
 let displayGitHubRepositories (repos: obj list) =
@@ -387,7 +412,8 @@ let main () =
     printfn "======================="
 
     let rootDirectory = getRootDirectory ()
-    let gitFolders = findGitFolders rootDirectory
+    let debugMode = shouldDebugLog ()
+    let gitFolders = findGitFolders rootDirectory debugMode
     let repoInfos = displayGitFolders gitFolders
 
     // Check for Octopus URL and API key, then display Octopus projects
@@ -769,6 +795,7 @@ let main () =
         printfn "Additional Options:"
         printfn "  --pull-repos              Perform git pull on all repositories (moved to end for performance)"
         printfn "  --skip-deployment-steps    Skip deployment step analysis (useful if API key lacks permissions)"
+        printfn "  --debug, -d               Enable debug logging (shows access denied and other detailed errors)"
         printfn "  --search-variable <pattern> Search for Octopus variables matching pattern"
         printfn "  --analyze-step <project/step> Analyze specific deployment step"
 

@@ -14,11 +14,13 @@ module DirectoryTraversal =
     /// - folderProcessor: Function that processes each directory and returns results
     /// - initialResults: Initial accumulator value
     /// - resultCombiner: Function to combine results from different directories
+    /// - debugMode: Whether to show detailed error messages including access denied
     let rec traverseDirectories<'T>
         (rootDir: string)
         (folderProcessor: string -> 'T list)
         (initialResults: 'T list)
         (resultCombiner: 'T list -> 'T list -> 'T list)
+        (debugMode: bool)
         =
 
         let mutable currentResults = initialResults
@@ -36,17 +38,17 @@ module DirectoryTraversal =
 
             for subdir in subdirs do
                 try
-                    currentResults <- traverseDirectories subdir folderProcessor currentResults resultCombiner
+                    currentResults <- traverseDirectories subdir folderProcessor currentResults resultCombiner debugMode
                 with
-                | :? UnauthorizedAccessException -> printfn $"Access denied: {subdir}"
-                | :? DirectoryNotFoundException -> printfn $"Directory not found: {subdir}"
-                | :? PathTooLongException -> printfn $"Path too long: {subdir}"
-                | ex -> printfn $"Error traversing {subdir}: {ex.Message}"
+                | :? UnauthorizedAccessException -> if debugMode then printfn $"Access denied: {subdir}"
+                | :? DirectoryNotFoundException -> if debugMode then printfn $"Directory not found: {subdir}"
+                | :? PathTooLongException -> if debugMode then printfn $"Path too long: {subdir}"
+                | ex -> if debugMode then printfn $"Error traversing {subdir}: {ex.Message}"
         with
-        | :? UnauthorizedAccessException -> printfn $"Access denied to directory: {rootDir}"
-        | :? DirectoryNotFoundException -> printfn $"Directory not found: {rootDir}"
-        | :? PathTooLongException -> printfn $"Path too long: {rootDir}"
-        | ex -> printfn $"Error accessing directory {rootDir}: {ex.Message}"
+        | :? UnauthorizedAccessException -> if debugMode then printfn $"Access denied to directory: {rootDir}"
+        | :? DirectoryNotFoundException -> if debugMode then printfn $"Directory not found: {rootDir}"
+        | :? PathTooLongException -> if debugMode then printfn $"Path too long: {rootDir}"
+        | ex -> if debugMode then printfn $"Error accessing directory {rootDir}: {ex.Message}"
 
         currentResults
 
@@ -56,6 +58,7 @@ module DirectoryTraversal =
         (folderProcessor: string -> 'T list)
         (initialResults: 'T list)
         (resultCombiner: 'T list -> 'T list -> 'T list)
+        (debugMode: bool)
         =
 
         let allResults = System.Collections.Generic.List<'T>()
@@ -65,10 +68,10 @@ module DirectoryTraversal =
             printfn $"Traversing directory: {rootDir}"
 
             try
-                let dirResults = traverseDirectories rootDir folderProcessor [] resultCombiner
+                let dirResults = traverseDirectories rootDir folderProcessor [] resultCombiner debugMode
                 allResults.AddRange(dirResults)
             with ex ->
-                printfn $"Error traversing root directory {rootDir}: {ex.Message}"
+                if debugMode then printfn $"Error traversing root directory {rootDir}: {ex.Message}"
 
         allResults |> Seq.toList
 
@@ -86,8 +89,9 @@ module DirectoryTraversal =
         (folderProcessor: string -> 'T list)
         (initialResults: 'T list)
         (resultCombiner: 'T list -> 'T list -> 'T list)
+        (debugMode: bool)
         =
 
         printfn "Traversing all local drives..."
         let localDrives = getLocalDrives ()
-        traverseMultipleRoots localDrives folderProcessor initialResults resultCombiner
+        traverseMultipleRoots localDrives folderProcessor initialResults resultCombiner debugMode

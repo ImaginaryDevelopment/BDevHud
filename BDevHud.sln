@@ -9,6 +9,8 @@ Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Octo.Adapter", "src\Octo.Ad
 EndProject
 Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "IO.Adapter", "src\IO.Adapter\IO.Adapter.fsproj", "{D4E5F6G7-H8I9-0123-DEFG-456789012345}"
 EndProject
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "SqlLite.Adapter", "src\SqlLite.Adapter\SqlLite.Adapter.fsproj", "{E5F6G7H8-I9J0-1234-FGHI-567890123456}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -27,6 +29,10 @@ Global
 		{D4E5F6G7-H8I9-0123-DEFG-456789012345}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D4E5F6G7-H8I9-0123-DEFG-456789012345}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D4E5F6G7-H8I9-0123-DEFG-456789012345}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E5F6G7H8-I9J0-1234-FGHI-567890123456}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E5F6G7H8-I9J0-1234-FGHI-567890123456}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E5F6G7H8-I9J0-1234-FGHI-567890123456}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E5F6G7H8-I9J0-1234-FGHI-567890123456}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
