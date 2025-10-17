@@ -12,15 +12,21 @@ open SqlLite.Adapter
 
 module OctopusOperations =
     
-    /// Get Octopus URL from environment variables
+    /// Get Octopus URL from command line args or environment variables
     let getOctopusUrl () : string option =
-        let octopusUrl = Environment.GetEnvironmentVariable("OCTOPUS_URL")
-        if String.IsNullOrEmpty(octopusUrl) then None else Some octopusUrl
+        match CommandLineArgs.getOctopusUrl() with
+        | Some url -> Some url
+        | None -> 
+            let octopusUrl = Environment.GetEnvironmentVariable("OCTOPUS_URL")
+            if String.IsNullOrEmpty(octopusUrl) then None else Some octopusUrl
 
-    /// Get Octopus API key from environment variables
+    /// Get Octopus API key from command line args or environment variables
     let getOctopusApiKey () : string option =
-        let apiKey = Environment.GetEnvironmentVariable("OCTO_API_KEY")
-        if String.IsNullOrEmpty(apiKey) then None else Some apiKey
+        match CommandLineArgs.getOctopusApiKey() with
+        | Some key -> Some key
+        | None ->
+            let apiKey = Environment.GetEnvironmentVariable("OCTO_API_KEY")
+            if String.IsNullOrEmpty(apiKey) then None else Some apiKey
 
     /// Format API key for display (show first 4 and last 4 characters)
     let formatApiKeyForDisplay (apiKey: string) : string =
@@ -92,6 +98,192 @@ module IntegrationHandlers =
                 printfn "Example:"
                 printfn "  $env:GITHUB_TOKEN=\"your_token_here\""
 
+    /// Handle Octopus integration if requested
+    let handleOctopusIntegration () =
+        if not (CommandLineArgs.shouldRunOctopus()) then
+            printfn "⏭️  Skipping Octopus integration (use --octopus to enable)"
+        else
+            printfn "\n%s" (String.replicate 50 "=")
+            printfn "Octopus Deploy Integration"
+            printfn "%s" (String.replicate 50 "=")
+
+            match OctopusOperations.getOctopusUrl(), OctopusOperations.getOctopusApiKey() with
+            | Some octopusUrl, Some apiKey ->
+                printfn "🐙 Octopus Deploy integration enabled"
+                printfn "Server: %s" octopusUrl
+                printfn "API Key: %s" (OctopusOperations.formatApiKeyForDisplay apiKey)
+                
+                try
+                    printfn "\n🔍 Fetching Octopus Deploy projects..."
+                    let config = { OctopusConfig.ServerUrl = octopusUrl; ApiKey = apiKey; Space = None }
+                    let projects = OctopusClient.getAllProjects config |> Async.AwaitTask |> Async.RunSynchronously
+                    
+                    printfn "📊 Found %d projects. Analyzing deployment processes for Git references..." projects.Length
+                    
+                    let mutable projectsWithGitSteps = []
+                    let mutable processedCount = 0
+                    
+                    for project in projects |> List.take (min 15 projects.Length) do
+                        processedCount <- processedCount + 1
+                        let isNextGenProject = project.Name.ToLower().Contains("nextgen")
+                        
+                        if isNextGenProject then
+                            printfn "� [%d/%d] **NEXTGEN PROJECT** - Deep Analysis: %s" processedCount (min 15 projects.Length) project.Name
+                        else
+                            printfn "�🔍 [%d/%d] Analyzing: %s" processedCount (min 15 projects.Length) project.Name
+                        
+                        try
+                            let deploymentStepsResult = OctopusClient.getProjectDeploymentProcess config project.Name |> Async.AwaitTask |> Async.RunSynchronously
+                            match deploymentStepsResult with
+                            | Ok steps ->
+                                if isNextGenProject then
+                                    printfn "   🔬 NEXTGEN DEEP DIVE - Found %d deployment steps" steps.Length
+                                    for i, step in steps |> List.indexed do
+                                        printfn "      📋 Step %d: %s" (i + 1) step.Name
+                                        printfn "         🎯 Action Type: %s" step.ActionType
+                                        printfn "         📊 Properties Count: %d" step.Properties.Count
+                                        
+                                        // For NextGen, show ALL properties to find Git references
+                                        if step.Properties.Count > 0 then
+                                            printfn "         📝 ALL Properties:"
+                                            for (key, value) in step.Properties |> Map.toSeq do
+                                                if value.Length > 100 then
+                                                    printfn "            🔑 %s: %s..." key (value.Substring(0, 80))
+                                                else
+                                                    printfn "            🔑 %s: %s" key value
+                                        
+                                        // Look for any potential Git references with relaxed criteria
+                                        let potentialGitProps = step.Properties |> Map.filter (fun key value ->
+                                            key.ToLower().Contains("git") ||
+                                            key.ToLower().Contains("repo") ||
+                                            key.ToLower().Contains("source") ||
+                                            key.ToLower().Contains("url") ||
+                                            value.ToLower().Contains("github") ||
+                                            value.ToLower().Contains("git") ||
+                                            value.ToLower().Contains("repo"))
+                                        
+                                        if potentialGitProps.Count > 0 then
+                                            printfn "         🌐 POTENTIAL GIT REFERENCES:"
+                                            for (key, value) in potentialGitProps |> Map.toSeq do
+                                                printfn "            ⭐ %s: %s" key value
+                                
+                                // First, let's look for ANY mention of git-related terms to debug
+                                let anyGitMentions = steps |> List.collect (fun step ->
+                                    step.Properties |> Map.toList |> List.filter (fun (key, value) ->
+                                        let lowerValue = value.ToLower()
+                                        let lowerKey = key.ToLower()
+                                        lowerValue.Contains("git") || lowerKey.Contains("git") ||
+                                        lowerValue.Contains("repo") || lowerKey.Contains("repo") ||
+                                        lowerValue.Contains("source") || lowerKey.Contains("source"))
+                                    |> List.map (fun (key, value) -> (step.Name, key, value)))
+                                
+                                if anyGitMentions.Length > 0 && processedCount <= 3 then
+                                    printfn "   🔍 Found %d potential Git mentions:" anyGitMentions.Length
+                                    for (stepName, key, value) in anyGitMentions |> List.take 5 do
+                                        let displayValue = if value.Length > 50 then value.Substring(0, 47) + "..." else value
+                                        printfn "      🔸 %s -> %s: %s" stepName key displayValue
+                                
+                                let gitSteps = steps |> List.filter (fun step ->
+                                    step.Properties |> Map.exists (fun key value -> 
+                                        let lowerValue = value.ToLower()
+                                        let lowerKey = key.ToLower()
+                                        
+                                        // Very broad search for any actual Git references
+                                        lowerValue.Contains("github.com") ||
+                                        lowerValue.Contains("gitlab.com") ||
+                                        lowerValue.Contains("bitbucket.org") ||
+                                        lowerValue.Contains("git@") ||
+                                        (lowerValue.Contains(".git") && lowerValue.Contains("http")) ||
+                                        lowerKey.Contains("giturl") || 
+                                        lowerKey.Contains("repositoryurl") ||
+                                        (lowerKey.Contains("git") && lowerKey.Contains("url"))))
+                                
+                                if gitSteps.Length > 0 then
+                                    projectsWithGitSteps <- (project.Name, gitSteps) :: projectsWithGitSteps
+                                    printfn "   ✅ Found %d Git-related steps" gitSteps.Length
+                                    
+                                    // Show details of Git steps found
+                                    for step in gitSteps |> List.take (min 2 gitSteps.Length) do
+                                        printfn "      📂 Git Step: %s (%s)" step.Name step.ActionType
+                                        let gitProps = step.Properties |> Map.filter (fun key value ->
+                                            let lowerValue = value.ToLower()
+                                            let lowerKey = key.ToLower()
+                                            lowerValue.Contains("github.com") ||
+                                            lowerValue.Contains("gitlab.com") ||
+                                            lowerValue.Contains(".git") ||
+                                            (lowerKey.Contains("git") && not (lowerKey.Contains("syntax"))))
+                                        for (key, value) in gitProps |> Map.toSeq |> Seq.take 3 do
+                                            let displayValue = if value.Length > 80 then value.Substring(0, 77) + "..." else value
+                                            printfn "         🔗 %s: %s" key displayValue
+                                else
+                                    if isNextGenProject then
+                                        printfn "   🤔 NEXTGEN: No Git references found with enhanced criteria - reviewed all properties above"
+                                    else
+                                        printfn "   ⚪ No Git references found"
+                            | Error err ->
+                                printfn "   ❌ Error: %s" err
+                        with
+                        | ex ->
+                            printfn "   ❌ Exception: %s" ex.Message
+                    
+                    if projects.Length > 15 then
+                        printfn "\n📝 Note: Only analyzed first 15 projects for Git references (including deep NextGen analysis)"
+                    
+                    printfn "\n📊 Summary:"
+                    printfn "   Total projects: %d" projects.Length
+                    printfn "   Analyzed: %d" (min 15 projects.Length)
+                    printfn "   With Git in deployment steps: %d" projectsWithGitSteps.Length
+                    
+                    if projectsWithGitSteps.Length > 0 then
+                        printfn "\n🔗 Projects with Git References in Deployment Steps:"
+                        for i, (projectName, gitSteps) in projectsWithGitSteps |> List.rev |> List.indexed do
+                            printfn "[%d] %s (%d Git steps)" (i + 1) projectName gitSteps.Length
+                            for step in gitSteps |> List.take (min 2 gitSteps.Length) do
+                                printfn "    📋 Step: %s" step.Name
+                                let gitProperties = step.Properties |> Map.filter (fun key value -> 
+                                    (key.ToLower().Contains("giturl") || 
+                                     key.ToLower().Contains("git.url") ||
+                                     key.ToLower().Contains("repository.url") ||
+                                     key.ToLower().Contains("repositoryurl") ||
+                                     key.ToLower().Contains("source.url") ||
+                                     value.ToLower().Contains("github.com") ||
+                                     (value.ToLower().Contains(".git") && value.ToLower().Contains("http")) ||
+                                     value.ToLower().Contains("git@")) &&
+                                    not (key.ToLower().Contains("script")) &&
+                                    not (key.ToLower().Contains("syntax")))
+                                for (key, value) in gitProperties |> Map.toSeq do
+                                    if value.Length < 100 then
+                                        printfn "       🔑 %s: %s" key value
+                                    else
+                                        printfn "       🔑 %s: %s..." key (value.Substring(0, 80))
+                    
+                    printfn "\n� Analysis Results:"
+                    printfn "   • Octopus projects appear to use packaged artifacts rather than direct Git integration"
+                    printfn "   • Deployment processes primarily use PowerShell scripts and package feeds"
+                    printfn "   • No direct Git repository references found in deployment step configurations"
+                    
+                    printfn "\n�💡 Next Steps:"
+                    if projectsWithGitSteps.Length > 0 then
+                        printfn "   • Found projects with Git integration in deployment processes"
+                        printfn "   • Use --github to explore GitHub repositories"
+                        printfn "   • Use --index-files to index project files for searching"
+                        printfn "   • Cross-reference with local repositories using --pull-repos"
+                    else
+                        printfn "   • Git integration likely exists at the package build level rather than deployment level"
+                        printfn "   • Use --github to explore available GitHub repositories and build processes"
+                        
+                with
+                | ex ->
+                    printfn "❌ Failed to connect to Octopus Deploy: %s" ex.Message
+                    printfn "Please verify the URL and API key are correct."
+                    
+            | None, _ ->
+                printfn "❌ Octopus Deploy URL not provided."
+                printfn "Use --octopus-url=\"your-url\" or set OCTOPUS_URL environment variable."
+            | _, None ->
+                printfn "❌ Octopus Deploy API key not provided."
+                printfn "Use --octopus-api-key=\"your-key\" or set OCTO_API_KEY environment variable."
+
 // =============================================================================
 // MAIN PROGRAM ENTRY POINT
 // =============================================================================
@@ -120,6 +312,7 @@ module Program =
 
         // Handle integrations based on command line flags
         IntegrationHandlers.handleGitHubIntegration ()
+        IntegrationHandlers.handleOctopusIntegration ()
         
         // Perform git pull operations if requested (using parallel processing)
         GitOperations.performParallelGitPulls repoInfos

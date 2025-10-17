@@ -42,6 +42,20 @@ module CommandLineArgs =
         |> Array.tryFind (fun arg -> arg.StartsWith("--search="))
         |> Option.map (fun arg -> arg.Substring(9)) // Remove "--search=" prefix
 
+    /// Get Octopus URL from command line args
+    let getOctopusUrl () =
+        let args = getArgs ()
+        args
+        |> Array.tryFind (fun arg -> arg.StartsWith("--octopus-url="))
+        |> Option.map (fun arg -> arg.Substring(14)) // Remove "--octopus-url=" prefix
+
+    /// Get Octopus API key from command line args  
+    let getOctopusApiKey () =
+        let args = getArgs ()
+        args
+        |> Array.tryFind (fun arg -> arg.StartsWith("--octopus-api-key="))
+        |> Option.map (fun arg -> arg.Substring(18)) // Remove "--octopus-api-key=" prefix
+
     /// Get root directory from command line args or environment variable
     let getRootDirectory () =
         let args = getArgs ()
@@ -87,10 +101,14 @@ module CommandLineArgs =
         let args = getArgs ()
         args |> Array.contains "--cleanup-blacklisted" || args |> Array.contains "--cleanup-bl"
 
-    /// Check if we should skip git operations (search-only mode)
+    /// Check if we should skip git operations (search-only mode or database-only operations)
     let shouldSkipGitOperations () =
         match getSearchTerm() with
         | Some _ -> 
-            // Only skip git ops if ONLY searching (no other operations requested)
-            not (shouldPullRepos() || shouldIndexFiles() || shouldShowIndexStats() || shouldCleanupDatabase() || shouldCleanupBlacklistedFiles())
-        | None -> false
+            // Skip git ops if ONLY searching (no other operations that need repos)
+            not (shouldPullRepos() || shouldIndexFiles())
+        | None -> 
+            // Skip git ops if ONLY doing database operations that don't need repos
+            let databaseOnlyOps = shouldShowIndexStats() || shouldCleanupDatabase() || shouldCleanupBlacklistedFiles()
+            let repoRequiredOps = shouldPullRepos() || shouldIndexFiles()
+            databaseOnlyOps && not repoRequiredOps
