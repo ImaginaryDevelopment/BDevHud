@@ -39,13 +39,29 @@ module CommandLineArgs =
         let args = getArgs ()
         args |> Array.contains "--github"
 
-    /// Get search term from command line args
+    /// Get search term from command line args (searches both git and octopus)
     let getSearchTerm () =
         let args = getArgs ()
         // Look for --search=term pattern
         args
         |> Array.tryFind (fun arg -> arg.StartsWith("--search="))
         |> Option.map (fun arg -> arg.Substring(9)) // Remove "--search=" prefix
+
+    /// Get git-only search term from command line args
+    let getSearchGitTerm () =
+        let args = getArgs ()
+        // Look for --search-git=term pattern
+        args
+        |> Array.tryFind (fun arg -> arg.StartsWith("--search-git="))
+        |> Option.map (fun arg -> arg.Substring(13)) // Remove "--search-git=" prefix
+
+    /// Get octopus-only search term from command line args
+    let getSearchOctoTerm () =
+        let args = getArgs ()
+        // Look for --search-octo=term pattern
+        args
+        |> Array.tryFind (fun arg -> arg.StartsWith("--search-octo="))
+        |> Option.map (fun arg -> arg.Substring(14)) // Remove "--search-octo=" prefix
 
     /// Get Octopus URL from command line args
     let getOctopusUrl () =
@@ -108,11 +124,12 @@ module CommandLineArgs =
 
     /// Check if we should skip git operations (search-only mode or database-only operations)
     let shouldSkipGitOperations () =
-        match getSearchTerm() with
-        | Some _ -> 
+        let hasAnySearch = getSearchTerm().IsSome || getSearchGitTerm().IsSome || getSearchOctoTerm().IsSome
+        match hasAnySearch with
+        | true -> 
             // Skip git ops if ONLY searching (no other operations that need repos)
             not (shouldPullRepos() || shouldIndexFiles())
-        | None -> 
+        | false -> 
             // Skip git ops if ONLY doing database operations that don't need repos
             let databaseOnlyOps = shouldShowIndexStats() || shouldCleanupDatabase() || shouldCleanupBlacklistedFiles()
             let repoRequiredOps = shouldPullRepos() || shouldIndexFiles()

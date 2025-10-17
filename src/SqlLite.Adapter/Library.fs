@@ -53,6 +53,17 @@ type OctopusTrigram = {
     PropertyKey: string
 }
 
+// Octopus step search result with deserialized properties
+type OctopusStepResult = {
+    Id: int
+    ProjectName: string
+    StepName: string
+    StepId: string
+    ActionType: string
+    Properties: Map<string, string>
+    IndexedAt: DateTime
+}
+
 /// SQLite-based cache for git repository information with pull attempt tracking
 module GitCache =
     
@@ -751,6 +762,74 @@ module FileIndex =
         with
         | ex ->
             printfn $"Error searching text: {ex.Message}"
+            []
+
+    // Search Octopus deployment steps using trigram matching
+    let searchOctopusSteps (searchTerm: string) : OctopusStepResult list =
+        try
+            if searchTerm.Length < 3 then
+                printfn "Search term must be at least 3 characters long"
+                []
+            else
+                initializeDatabase()
+                
+                let searchTrigrams = generateTrigrams searchTerm |> List.map fst
+                
+                use connection = new SqliteConnection($"Data Source={dbPath}")
+                connection.Open()
+                
+                // Find Octopus steps that contain all trigrams from the search term
+                let searchQuery = """
+                    SELECT DISTINCT s.id, s.project_name, s.step_name, s.step_id, s.action_type, s.properties_json, s.indexed_at
+                    FROM octopus_steps s
+                    WHERE s.id IN (
+                        SELECT step_id
+                        FROM octopus_trigrams
+                        WHERE trigram IN (""" + String.Join(",", searchTrigrams |> List.mapi (fun i _ -> $"@trigram{i}")) + """)
+                        GROUP BY step_id
+                        HAVING COUNT(DISTINCT trigram) = @trigram_count
+                    )
+                    ORDER BY s.project_name, s.step_name
+                """
+                
+                use command = new SqliteCommand(searchQuery, connection)
+                
+                // Add parameters for each trigram
+                searchTrigrams |> List.iteri (fun i trigram ->
+                    command.Parameters.AddWithValue($"@trigram{i}", trigram) |> ignore)
+                
+                command.Parameters.AddWithValue("@trigram_count", searchTrigrams.Length) |> ignore
+                
+                use reader = command.ExecuteReader()
+                
+                let mutable results = []
+                
+                while reader.Read() do
+                    let propertiesJson = reader.["properties_json"] :?> string
+                    let properties = 
+                        if String.IsNullOrWhiteSpace(propertiesJson) then
+                            Map.empty
+                        else
+                            try
+                                System.Text.Json.JsonSerializer.Deserialize<Map<string, string>>(propertiesJson)
+                            with
+                            | _ -> Map.empty
+                    
+                    let step = {
+                        OctopusStepResult.Id = reader.["id"] :?> int64 |> int
+                        ProjectName = reader.["project_name"] :?> string
+                        StepName = reader.["step_name"] :?> string
+                        StepId = reader.["step_id"] :?> string
+                        ActionType = reader.["action_type"] :?> string
+                        Properties = properties
+                        IndexedAt = DateTime.Parse(reader.["indexed_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                    }
+                    results <- step :: results
+                
+                List.rev results
+        with
+        | ex ->
+            printfn $"Error searching Octopus steps: {ex.Message}"
             []
 
     // Get indexing statistics
