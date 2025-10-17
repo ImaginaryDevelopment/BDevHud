@@ -29,6 +29,11 @@ module CommandLineArgs =
         let args = getArgs ()
         args |> Array.contains "--octopus"
 
+    /// Check if Octopus Deploy data should be indexed
+    let shouldIndexOctopus () =
+        let args = getArgs ()
+        args |> Array.contains "--index-octopus" || args |> Array.contains "--octopus-index"
+
     /// Check if GitHub integration should be performed
     let shouldRunGitHub () =
         let args = getArgs ()

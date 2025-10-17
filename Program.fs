@@ -284,6 +284,84 @@ module IntegrationHandlers =
                 printfn "❌ Octopus Deploy API key not provided."
                 printfn "Use --octopus-api-key=\"your-key\" or set OCTO_API_KEY environment variable."
 
+    /// Handle Octopus Deploy data indexing
+    let handleOctopusIndexing () =
+        if not (CommandLineArgs.shouldIndexOctopus()) then
+            printfn "⏭️  Skipping Octopus indexing (use --index-octopus to enable)"
+        else
+            printfn "\n%s" (String.replicate 50 "=")
+            printfn "Octopus Deploy Data Indexing"
+            printfn "%s" (String.replicate 50 "=")
+
+            match OctopusOperations.getOctopusUrl(), OctopusOperations.getOctopusApiKey() with
+            | Some octopusUrl, Some apiKey ->
+                printfn "🗃️  Octopus Deploy indexing enabled"
+                printfn "Server: %s" octopusUrl
+                printfn "API Key: %s" (OctopusOperations.formatApiKeyForDisplay apiKey)
+                
+                try
+                    printfn "\n📊 Current Octopus index statistics:"
+                    let (stepCount, trigramCount, projects) = FileIndex.getOctopusIndexStats(FileIndex.dbPath)
+                    printfn "   Steps indexed: %d" stepCount
+                    printfn "   Trigrams indexed: %d" trigramCount
+                    printfn "   Projects: %d" projects.Length
+                    
+                    printfn "\n🔍 Fetching Octopus Deploy projects for indexing..."
+                    let config = { OctopusConfig.ServerUrl = octopusUrl; ApiKey = apiKey; Space = None }
+                    let projects = OctopusClient.getAllProjects config |> Async.AwaitTask |> Async.RunSynchronously
+                    
+                    printfn "📊 Found %d projects. Indexing deployment step properties..." projects.Length
+                    
+                    let mutable totalStepsIndexed = 0
+                    let mutable totalTrigramsAdded = 0
+                    
+                    for project in projects do
+                        printfn "\n🔍 Processing: %s" project.Name
+                        
+                        try
+                            let deploymentStepsResult = OctopusClient.getProjectDeploymentProcess config project.Name |> Async.AwaitTask |> Async.RunSynchronously
+                            match deploymentStepsResult with
+                            | Ok steps ->
+                                printfn "   Found %d deployment steps" steps.Length
+                                
+                                for step in steps do
+                                    try
+                                        // Properties are already a Map<string, string>
+                                        let properties = step.Properties
+                                        
+                                        // Index this step
+                                        FileIndex.indexOctopusStep project.Name step.Name step.StepId step.ActionType properties
+                                        totalStepsIndexed <- totalStepsIndexed + 1
+                                        
+                                    with
+                                    | ex ->
+                                        printfn "   ❌ Error indexing step '%s': %s" step.Name ex.Message
+                                
+                            | Error err ->
+                                printfn "   ❌ Error getting deployment steps: %s" err
+                        with
+                        | ex ->
+                            printfn "   ❌ Error processing project '%s': %s" project.Name ex.Message
+                    
+                    printfn "\n📈 Final indexing statistics:"
+                    let (finalStepCount, finalTrigramCount, finalProjects) = FileIndex.getOctopusIndexStats(FileIndex.dbPath)
+                    printfn "   Total steps indexed: %d" finalStepCount
+                    printfn "   Total trigrams: %d" finalTrigramCount
+                    printfn "   Projects with data: %d" finalProjects.Length
+                    printfn "   Steps processed this run: %d" totalStepsIndexed
+                    
+                with
+                | ex ->
+                    printfn "❌ Failed to index Octopus Deploy data: %s" ex.Message
+                    printfn "Please verify the URL and API key are correct."
+                    
+            | None, _ ->
+                printfn "❌ Octopus Deploy URL not provided."
+                printfn "Use --octopus-url=\"your-url\" or set OCTOPUS_URL environment variable."
+            | _, None ->
+                printfn "❌ Octopus Deploy API key not provided."
+                printfn "Use --octopus-api-key=\"your-key\" or set OCTO_API_KEY environment variable."
+
 // =============================================================================
 // MAIN PROGRAM ENTRY POINT
 // =============================================================================
@@ -313,6 +391,7 @@ module Program =
         // Handle integrations based on command line flags
         IntegrationHandlers.handleGitHubIntegration ()
         IntegrationHandlers.handleOctopusIntegration ()
+        IntegrationHandlers.handleOctopusIndexing ()
         
         // Perform git pull operations if requested (using parallel processing)
         GitOperations.performParallelGitPulls repoInfos

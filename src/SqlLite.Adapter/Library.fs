@@ -34,6 +34,25 @@ type TrigramEntry = {
     Position: int
 }
 
+// Octopus deployment step entry
+type OctopusStep = {
+    Id: int
+    ProjectName: string
+    StepName: string
+    StepId: string
+    ActionType: string
+    PropertiesJson: string
+    IndexedAt: DateTime
+}
+
+// Octopus trigram entry
+type OctopusTrigram = {
+    Trigram: string
+    StepId: int
+    Position: int
+    PropertyKey: string
+}
+
 /// SQLite-based cache for git repository information with pull attempt tracking
 module GitCache =
     
@@ -302,7 +321,7 @@ module GitCache =
 /// File indexing and trigram search functionality
 module FileIndex =
     
-    let private dbPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BDevHud", "file_index.db")
+    let dbPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BDevHud", "file_index.db")
     
     // Ensure the directory exists
     let private ensureDirectoryExists () =
@@ -370,6 +389,53 @@ module FileIndex =
         
         use command4 = new SqliteCommand(createFilePathIndexCommand, connection)
         command4.ExecuteNonQuery() |> ignore
+
+        // Create Octopus deployment steps table
+        let createOctopusStepsTableCommand = """
+            CREATE TABLE IF NOT EXISTS octopus_steps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_name TEXT NOT NULL COLLATE NOCASE,
+                step_name TEXT NOT NULL COLLATE NOCASE,
+                step_id TEXT NOT NULL COLLATE NOCASE,
+                action_type TEXT NOT NULL COLLATE NOCASE,
+                properties_json TEXT NOT NULL COLLATE NOCASE,
+                indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(project_name, step_id)
+            )
+        """
+
+        // Create Octopus trigrams table
+        let createOctopusTrigramsTableCommand = """
+            CREATE TABLE IF NOT EXISTS octopus_trigrams (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trigram TEXT NOT NULL COLLATE NOCASE,
+                step_id INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                property_key TEXT NOT NULL COLLATE NOCASE,
+                FOREIGN KEY (step_id) REFERENCES octopus_steps (id) ON DELETE CASCADE
+            )
+        """
+
+        // Create indexes for Octopus tables
+        let createOctopusTrigramIndexCommand = """
+            CREATE INDEX IF NOT EXISTS idx_octopus_trigrams_trigram ON octopus_trigrams(trigram)
+        """
+
+        let createOctopusStepsIndexCommand = """
+            CREATE INDEX IF NOT EXISTS idx_octopus_steps_project ON octopus_steps(project_name)
+        """
+
+        use command5 = new SqliteCommand(createOctopusStepsTableCommand, connection)
+        command5.ExecuteNonQuery() |> ignore
+
+        use command6 = new SqliteCommand(createOctopusTrigramsTableCommand, connection)
+        command6.ExecuteNonQuery() |> ignore
+
+        use command7 = new SqliteCommand(createOctopusTrigramIndexCommand, connection)
+        command7.ExecuteNonQuery() |> ignore
+
+        use command8 = new SqliteCommand(createOctopusStepsIndexCommand, connection)
+        command8.ExecuteNonQuery() |> ignore
     
     // Generate trigrams from text with parallel processing for large texts
     let private generateTrigrams (text: string) : (string * int) list =
@@ -965,3 +1031,114 @@ module FileIndex =
         with
         | ex ->
             printfn $"Error cleaning up blacklisted files: {ex.Message}"
+
+    /// Index an Octopus deployment step with its properties for trigram search
+    let indexOctopusStep (projectName: string) (stepName: string) (stepId: string) (actionType: string) (properties: Map<string, string>) : unit =
+        initializeDatabase()
+        
+        use connection = new SqliteConnection($"Data Source={dbPath}")
+        connection.Open()
+        
+        try
+            // Serialize properties to JSON
+            let propertiesJson = 
+                properties 
+                |> Map.toSeq 
+                |> Seq.map (fun (k, v) -> sprintf "\"%s\":\"%s\"" (k.Replace("\"", "\\\"")) (v.Replace("\"", "\\\"")))
+                |> String.concat ","
+                |> sprintf "{%s}"
+            
+            use transaction = connection.BeginTransaction()
+            try
+                // Insert or update the step
+                let upsertStepCommand = """
+                    INSERT OR REPLACE INTO octopus_steps (project_name, step_name, step_id, action_type, properties_json, indexed_at)
+                    VALUES (@project_name, @step_name, @step_id, @action_type, @properties_json, @indexed_at)
+                """
+                
+                use stepCommand = new SqliteCommand(upsertStepCommand, connection, transaction)
+                stepCommand.Parameters.AddWithValue("@project_name", projectName) |> ignore
+                stepCommand.Parameters.AddWithValue("@step_name", stepName) |> ignore
+                stepCommand.Parameters.AddWithValue("@step_id", stepId) |> ignore
+                stepCommand.Parameters.AddWithValue("@action_type", actionType) |> ignore
+                stepCommand.Parameters.AddWithValue("@properties_json", propertiesJson) |> ignore
+                stepCommand.Parameters.AddWithValue("@indexed_at", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")) |> ignore
+                stepCommand.ExecuteNonQuery() |> ignore
+                
+                // Get the step's database ID
+                let getIdCommand = """
+                    SELECT id FROM octopus_steps WHERE project_name = @project_name AND step_id = @step_id
+                """
+                use getIdCmd = new SqliteCommand(getIdCommand, connection, transaction)
+                getIdCmd.Parameters.AddWithValue("@project_name", projectName) |> ignore
+                getIdCmd.Parameters.AddWithValue("@step_id", stepId) |> ignore
+                let dbStepId = getIdCmd.ExecuteScalar() :?> int64 |> int
+                
+                // Delete existing trigrams for this step
+                let deleteTrigramsCommand = "DELETE FROM octopus_trigrams WHERE step_id = @step_id"
+                use deleteCmd = new SqliteCommand(deleteTrigramsCommand, connection, transaction)
+                deleteCmd.Parameters.AddWithValue("@step_id", dbStepId) |> ignore
+                deleteCmd.ExecuteNonQuery() |> ignore
+                
+                // Generate and insert trigrams for each property
+                for (key, value) in properties |> Map.toSeq do
+                    let combinedText = sprintf "%s:%s" key value
+                    let trigrams = generateTrigrams combinedText
+                    
+                    for (trigram, position) in trigrams do
+                        let insertTrigramCommand = """
+                            INSERT INTO octopus_trigrams (trigram, step_id, position, property_key)
+                            VALUES (@trigram, @step_id, @position, @property_key)
+                        """
+                        
+                        use trigramCmd = new SqliteCommand(insertTrigramCommand, connection, transaction)
+                        trigramCmd.Parameters.AddWithValue("@trigram", trigram) |> ignore
+                        trigramCmd.Parameters.AddWithValue("@step_id", dbStepId) |> ignore
+                        trigramCmd.Parameters.AddWithValue("@position", position) |> ignore
+                        trigramCmd.Parameters.AddWithValue("@property_key", key) |> ignore
+                        trigramCmd.ExecuteNonQuery() |> ignore
+                
+                transaction.Commit()
+                let trigramCount = properties |> Map.toSeq |> Seq.sumBy (fun (k,v) -> generateTrigrams (sprintf "%s:%s" k v) |> List.length)
+                printfn $"✅ Indexed step '{stepName}' with {properties.Count} properties and {trigramCount} trigrams"
+            with
+            | ex -> 
+                transaction.Rollback()
+                raise ex
+        with
+        | ex ->
+            printfn $"❌ Error indexing Octopus step '{stepName}' in project '{projectName}': {ex.Message}"
+
+    /// Get count of indexed Octopus data
+    let getOctopusIndexStats (dbPath: string) : (int * int * string list) =
+        initializeDatabase()
+        
+        use connection = new SqliteConnection($"Data Source={dbPath}")
+        connection.Open()
+        
+        try
+            // Get step count
+            let stepCountQuery = "SELECT COUNT(*) FROM octopus_steps"
+            use stepCountCmd = new SqliteCommand(stepCountQuery, connection)
+            let stepCount = stepCountCmd.ExecuteScalar() :?> int64 |> int
+            
+            // Get trigram count  
+            let trigramCountQuery = "SELECT COUNT(*) FROM octopus_trigrams"
+            use trigramCountCmd = new SqliteCommand(trigramCountQuery, connection)
+            let trigramCount = trigramCountCmd.ExecuteScalar() :?> int64 |> int
+            
+            // Get project list
+            let projectQuery = "SELECT DISTINCT project_name FROM octopus_steps ORDER BY project_name"
+            use projectCmd = new SqliteCommand(projectQuery, connection)
+            use reader = projectCmd.ExecuteReader()
+            
+            let projects = ResizeArray<string>()
+            while reader.Read() do
+                projects.Add(reader.GetString(0))
+            
+            let projectList = projects |> List.ofSeq
+            (stepCount, trigramCount, projectList)
+        with
+        | ex ->
+            printfn $"Error getting Octopus index stats: {ex.Message}"
+            (0, 0, [])
