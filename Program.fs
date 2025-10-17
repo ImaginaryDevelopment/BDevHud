@@ -314,6 +314,8 @@ module IntegrationHandlers =
                     
                     let mutable totalStepsIndexed = 0
                     let mutable totalTrigramsAdded = 0
+                    let mutable totalTemplatesIndexed = 0
+                    let indexedTemplates = System.Collections.Generic.HashSet<string>()
                     
                     for project in projects do
                         printfn "\n🔍 Processing: %s" project.Name
@@ -329,8 +331,40 @@ module IntegrationHandlers =
                                         // Properties are already a Map<string, string>
                                         let properties = step.Properties
                                         
+                                        // Check if step uses a template and index it if not already indexed
+                                        match step.StepTemplateId with
+                                        | Some templateId when not (indexedTemplates.Contains(templateId)) ->
+                                            printfn "   📋 Indexing step template: %s" (step.StepTemplate |> Option.defaultValue templateId)
+                                            try
+                                                let templateResult = OctopusClient.getStepTemplate config templateId |> Async.AwaitTask |> Async.RunSynchronously
+                                                match templateResult with
+                                                | Ok templateInfo ->
+                                                    // Convert template properties to Map
+                                                    let templateProps = 
+                                                        match templateInfo.PowerShellScript with
+                                                        | Some script -> 
+                                                            Map.empty
+                                                            |> Map.add "Octopus.Action.Script.ScriptBody" script
+                                                        | None -> Map.empty
+                                                    
+                                                    FileIndex.indexStepTemplate 
+                                                        templateInfo.Id 
+                                                        templateInfo.Name 
+                                                        templateInfo.Description 
+                                                        templateInfo.PowerShellScript 
+                                                        templateProps
+                                                    
+                                                    indexedTemplates.Add(templateId) |> ignore
+                                                    totalTemplatesIndexed <- totalTemplatesIndexed + 1
+                                                | Error err ->
+                                                    printfn "   ⚠️  Could not fetch template: %s" err
+                                            with
+                                            | ex ->
+                                                printfn "   ⚠️  Error indexing template: %s" ex.Message
+                                        | _ -> ()
+                                        
                                         // Index this step
-                                        FileIndex.indexOctopusStep project.Name step.Name step.StepId step.ActionType properties
+                                        FileIndex.indexOctopusStep project.Name step.Name step.StepId step.ActionType step.StepTemplateId properties
                                         totalStepsIndexed <- totalStepsIndexed + 1
                                         
                                     with
@@ -349,6 +383,7 @@ module IntegrationHandlers =
                     printfn "   Total trigrams: %d" finalTrigramCount
                     printfn "   Projects with data: %d" finalProjects.Length
                     printfn "   Steps processed this run: %d" totalStepsIndexed
+                    printfn "   Step templates indexed this run: %d" totalTemplatesIndexed
                     
                 with
                 | ex ->

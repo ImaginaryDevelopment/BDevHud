@@ -84,7 +84,10 @@ module SearchOperations =
                 stepsInProject
                 |> List.iteri (fun stepIndex step ->
                     printfn "\n    [%d.%d] Step: %s" (projectIndex + 1) (stepIndex + 1) step.StepName
-                    printfn "        � Action Type: %s" step.ActionType
+                    match step.StepTemplateName with
+                    | Some templateName -> printfn "        📋 Template: %s" templateName
+                    | None -> ()
+                    printfn "        🔧 Action Type: %s" step.ActionType
                     printfn "        🆔 Step ID: %s" step.StepId
                     printfn "        🕐 Indexed: %s" (step.IndexedAt.ToString("yyyy-MM-dd HH:mm:ss"))
                     

@@ -42,6 +42,18 @@ type OctopusStep = {
     StepId: string
     ActionType: string
     PropertiesJson: string
+    StepTemplateId: string option
+    IndexedAt: DateTime
+}
+
+// Octopus step template
+type OctopusStepTemplate = {
+    Id: int
+    TemplateId: string
+    TemplateName: string
+    Description: string
+    ScriptBody: string option
+    PropertiesJson: string
     IndexedAt: DateTime
 }
 
@@ -53,6 +65,14 @@ type OctopusTrigram = {
     PropertyKey: string
 }
 
+// Octopus template trigram entry
+type OctopusTemplateTrigram = {
+    Trigram: string
+    TemplateId: int
+    Position: int
+    PropertyKey: string
+}
+
 // Octopus step search result with deserialized properties
 type OctopusStepResult = {
     Id: int
@@ -60,6 +80,18 @@ type OctopusStepResult = {
     StepName: string
     StepId: string
     ActionType: string
+    Properties: Map<string, string>
+    StepTemplateName: string option
+    IndexedAt: DateTime
+}
+
+// Octopus step template search result with deserialized properties
+type OctopusStepTemplateResult = {
+    Id: int
+    TemplateId: string
+    TemplateName: string
+    Description: string
+    ScriptBody: string option
     Properties: Map<string, string>
     IndexedAt: DateTime
 }
@@ -410,8 +442,43 @@ module FileIndex =
                 step_id TEXT NOT NULL COLLATE NOCASE,
                 action_type TEXT NOT NULL COLLATE NOCASE,
                 properties_json TEXT NOT NULL COLLATE NOCASE,
+                step_template_id TEXT COLLATE NOCASE,
                 indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(project_name, step_id)
+            )
+        """
+
+        use command5 = new SqliteCommand(createOctopusStepsTableCommand, connection)
+        command5.ExecuteNonQuery() |> ignore
+
+        // Migration: Add step_template_id column if it doesn't exist
+        let checkColumnQuery = "PRAGMA table_info(octopus_steps)"
+        use checkCmd = new SqliteCommand(checkColumnQuery, connection)
+        use reader = checkCmd.ExecuteReader()
+        let mutable hasStepTemplateIdColumn = false
+        while reader.Read() do
+            let columnName = reader.GetString(1) // Column name is at index 1
+            if columnName = "step_template_id" then
+                hasStepTemplateIdColumn <- true
+        reader.Close()
+        
+        if not hasStepTemplateIdColumn then
+            printfn "🔧 Migrating database: Adding step_template_id column to octopus_steps table..."
+            let alterTableCommand = "ALTER TABLE octopus_steps ADD COLUMN step_template_id TEXT COLLATE NOCASE"
+            use alterCmd = new SqliteCommand(alterTableCommand, connection)
+            alterCmd.ExecuteNonQuery() |> ignore
+            printfn "✅ Migration complete!"
+
+        // Create Octopus step templates table
+        let createOctopusStepTemplatesTableCommand = """
+            CREATE TABLE IF NOT EXISTS octopus_step_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                template_name TEXT NOT NULL COLLATE NOCASE,
+                description TEXT COLLATE NOCASE,
+                script_body TEXT COLLATE NOCASE,
+                properties_json TEXT NOT NULL COLLATE NOCASE,
+                indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """
 
@@ -427,6 +494,18 @@ module FileIndex =
             )
         """
 
+        // Create Octopus step template trigrams table
+        let createOctopusTemplateTrigramsTableCommand = """
+            CREATE TABLE IF NOT EXISTS octopus_template_trigrams (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trigram TEXT NOT NULL COLLATE NOCASE,
+                template_id INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                property_key TEXT NOT NULL COLLATE NOCASE,
+                FOREIGN KEY (template_id) REFERENCES octopus_step_templates (id) ON DELETE CASCADE
+            )
+        """
+
         // Create indexes for Octopus tables
         let createOctopusTrigramIndexCommand = """
             CREATE INDEX IF NOT EXISTS idx_octopus_trigrams_trigram ON octopus_trigrams(trigram)
@@ -436,17 +515,37 @@ module FileIndex =
             CREATE INDEX IF NOT EXISTS idx_octopus_steps_project ON octopus_steps(project_name)
         """
 
+        let createOctopusTemplateTrigramIndexCommand = """
+            CREATE INDEX IF NOT EXISTS idx_octopus_template_trigrams_trigram ON octopus_template_trigrams(trigram)
+        """
+
+        let createOctopusTemplatesIndexCommand = """
+            CREATE INDEX IF NOT EXISTS idx_octopus_templates_template_id ON octopus_step_templates(template_id)
+        """
+
         use command5 = new SqliteCommand(createOctopusStepsTableCommand, connection)
         command5.ExecuteNonQuery() |> ignore
 
-        use command6 = new SqliteCommand(createOctopusTrigramsTableCommand, connection)
+        use command6 = new SqliteCommand(createOctopusStepTemplatesTableCommand, connection)
         command6.ExecuteNonQuery() |> ignore
 
-        use command7 = new SqliteCommand(createOctopusTrigramIndexCommand, connection)
+        use command7 = new SqliteCommand(createOctopusTrigramsTableCommand, connection)
         command7.ExecuteNonQuery() |> ignore
 
-        use command8 = new SqliteCommand(createOctopusStepsIndexCommand, connection)
+        use command8 = new SqliteCommand(createOctopusTemplateTrigramsTableCommand, connection)
         command8.ExecuteNonQuery() |> ignore
+
+        use command9 = new SqliteCommand(createOctopusTrigramIndexCommand, connection)
+        command9.ExecuteNonQuery() |> ignore
+
+        use command10 = new SqliteCommand(createOctopusStepsIndexCommand, connection)
+        command10.ExecuteNonQuery() |> ignore
+
+        use command11 = new SqliteCommand(createOctopusTemplateTrigramIndexCommand, connection)
+        command11.ExecuteNonQuery() |> ignore
+
+        use command12 = new SqliteCommand(createOctopusTemplatesIndexCommand, connection)
+        command12.ExecuteNonQuery() |> ignore
     
     // Generate trigrams from text with parallel processing for large texts
     let private generateTrigrams (text: string) : (string * int) list =
@@ -779,9 +878,11 @@ module FileIndex =
                 connection.Open()
                 
                 // Find Octopus steps that contain all trigrams from the search term
+                // Join with step templates to get template name if available
                 let searchQuery = """
-                    SELECT DISTINCT s.id, s.project_name, s.step_name, s.step_id, s.action_type, s.properties_json, s.indexed_at
+                    SELECT DISTINCT s.id, s.project_name, s.step_name, s.step_id, s.action_type, s.properties_json, s.indexed_at, t.template_name
                     FROM octopus_steps s
+                    LEFT JOIN octopus_step_templates t ON s.step_template_id = t.template_id
                     WHERE s.id IN (
                         SELECT step_id
                         FROM octopus_trigrams
@@ -815,6 +916,12 @@ module FileIndex =
                             with
                             | _ -> Map.empty
                     
+                    let templateName = 
+                        if reader.["template_name"] = box DBNull.Value then
+                            None
+                        else
+                            Some (reader.["template_name"] :?> string)
+                    
                     let step = {
                         OctopusStepResult.Id = reader.["id"] :?> int64 |> int
                         ProjectName = reader.["project_name"] :?> string
@@ -822,6 +929,7 @@ module FileIndex =
                         StepId = reader.["step_id"] :?> string
                         ActionType = reader.["action_type"] :?> string
                         Properties = properties
+                        StepTemplateName = templateName
                         IndexedAt = DateTime.Parse(reader.["indexed_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
                     }
                     results <- step :: results
@@ -1111,8 +1219,100 @@ module FileIndex =
         | ex ->
             printfn $"Error cleaning up blacklisted files: {ex.Message}"
 
+    /// Index an Octopus step template with its properties for trigram search
+    let indexStepTemplate (templateId: string) (templateName: string) (description: string) (scriptBody: string option) (properties: Map<string, string>) : unit =
+        initializeDatabase()
+        
+        use connection = new SqliteConnection($"Data Source={dbPath}")
+        connection.Open()
+        
+        try
+            // Serialize properties to JSON
+            let propertiesJson = 
+                properties 
+                |> Map.toSeq 
+                |> Seq.map (fun (k, v) -> sprintf "\"%s\":\"%s\"" (k.Replace("\"", "\\\"")) (v.Replace("\"", "\\\"")))
+                |> String.concat ","
+                |> sprintf "{%s}"
+            
+            use transaction = connection.BeginTransaction()
+            try
+                // Insert or update the step template
+                let upsertTemplateCommand = """
+                    INSERT OR REPLACE INTO octopus_step_templates (template_id, template_name, description, script_body, properties_json, indexed_at)
+                    VALUES (@template_id, @template_name, @description, @script_body, @properties_json, @indexed_at)
+                """
+                
+                use templateCommand = new SqliteCommand(upsertTemplateCommand, connection, transaction)
+                templateCommand.Parameters.AddWithValue("@template_id", templateId) |> ignore
+                templateCommand.Parameters.AddWithValue("@template_name", templateName) |> ignore
+                templateCommand.Parameters.AddWithValue("@description", description) |> ignore
+                templateCommand.Parameters.AddWithValue("@script_body", scriptBody |> Option.defaultValue "") |> ignore
+                templateCommand.Parameters.AddWithValue("@properties_json", propertiesJson) |> ignore
+                templateCommand.Parameters.AddWithValue("@indexed_at", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")) |> ignore
+                templateCommand.ExecuteNonQuery() |> ignore
+                
+                // Get the template's database ID
+                let getIdCommand = """
+                    SELECT id FROM octopus_step_templates WHERE template_id = @template_id
+                """
+                use getIdCmd = new SqliteCommand(getIdCommand, connection, transaction)
+                getIdCmd.Parameters.AddWithValue("@template_id", templateId) |> ignore
+                let dbTemplateId = getIdCmd.ExecuteScalar() :?> int64 |> int
+                
+                // Delete existing trigrams for this template
+                let deleteTrigramsCommand = "DELETE FROM octopus_template_trigrams WHERE template_id = @template_id"
+                use deleteCmd = new SqliteCommand(deleteTrigramsCommand, connection, transaction)
+                deleteCmd.Parameters.AddWithValue("@template_id", dbTemplateId) |> ignore
+                deleteCmd.ExecuteNonQuery() |> ignore
+                
+                // Generate and insert trigrams for each property
+                for (key, value) in properties |> Map.toSeq do
+                    let combinedText = sprintf "%s:%s" key value
+                    let trigrams = generateTrigrams combinedText
+                    
+                    for (trigram, position) in trigrams do
+                        let insertTrigramCommand = """
+                            INSERT INTO octopus_template_trigrams (trigram, template_id, position, property_key)
+                            VALUES (@trigram, @template_id, @position, @property_key)
+                        """
+                        
+                        use trigramCmd = new SqliteCommand(insertTrigramCommand, connection, transaction)
+                        trigramCmd.Parameters.AddWithValue("@trigram", trigram) |> ignore
+                        trigramCmd.Parameters.AddWithValue("@template_id", dbTemplateId) |> ignore
+                        trigramCmd.Parameters.AddWithValue("@position", position) |> ignore
+                        trigramCmd.Parameters.AddWithValue("@property_key", key) |> ignore
+                        trigramCmd.ExecuteNonQuery() |> ignore
+                
+                // Also generate trigrams for script body if present
+                match scriptBody with
+                | Some script when not (String.IsNullOrWhiteSpace(script)) ->
+                    let trigrams = generateTrigrams script
+                    for (trigram, position) in trigrams do
+                        let insertTrigramCommand = """
+                            INSERT INTO octopus_template_trigrams (trigram, template_id, position, property_key)
+                            VALUES (@trigram, @template_id, @position, @property_key)
+                        """
+                        
+                        use trigramCmd = new SqliteCommand(insertTrigramCommand, connection, transaction)
+                        trigramCmd.Parameters.AddWithValue("@trigram", trigram) |> ignore
+                        trigramCmd.Parameters.AddWithValue("@template_id", dbTemplateId) |> ignore
+                        trigramCmd.Parameters.AddWithValue("@position", position) |> ignore
+                        trigramCmd.Parameters.AddWithValue("@property_key", "ScriptBody") |> ignore
+                        trigramCmd.ExecuteNonQuery() |> ignore
+                | _ -> ()
+                
+                transaction.Commit()
+            with
+            | ex ->
+                transaction.Rollback()
+                printfn $"Transaction failed for step template '{templateName}': {ex.Message}"
+        with
+        | ex ->
+            printfn $"❌ Error indexing step template '{templateName}': {ex.Message}"
+
     /// Index an Octopus deployment step with its properties for trigram search
-    let indexOctopusStep (projectName: string) (stepName: string) (stepId: string) (actionType: string) (properties: Map<string, string>) : unit =
+    let indexOctopusStep (projectName: string) (stepName: string) (stepId: string) (actionType: string) (stepTemplateId: string option) (properties: Map<string, string>) : unit =
         initializeDatabase()
         
         use connection = new SqliteConnection($"Data Source={dbPath}")
@@ -1131,8 +1331,8 @@ module FileIndex =
             try
                 // Insert or update the step
                 let upsertStepCommand = """
-                    INSERT OR REPLACE INTO octopus_steps (project_name, step_name, step_id, action_type, properties_json, indexed_at)
-                    VALUES (@project_name, @step_name, @step_id, @action_type, @properties_json, @indexed_at)
+                    INSERT OR REPLACE INTO octopus_steps (project_name, step_name, step_id, action_type, properties_json, step_template_id, indexed_at)
+                    VALUES (@project_name, @step_name, @step_id, @action_type, @properties_json, @step_template_id, @indexed_at)
                 """
                 
                 use stepCommand = new SqliteCommand(upsertStepCommand, connection, transaction)
@@ -1141,6 +1341,7 @@ module FileIndex =
                 stepCommand.Parameters.AddWithValue("@step_id", stepId) |> ignore
                 stepCommand.Parameters.AddWithValue("@action_type", actionType) |> ignore
                 stepCommand.Parameters.AddWithValue("@properties_json", propertiesJson) |> ignore
+                stepCommand.Parameters.AddWithValue("@step_template_id", match stepTemplateId with | Some tid -> box tid | None -> box DBNull.Value) |> ignore
                 stepCommand.Parameters.AddWithValue("@indexed_at", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")) |> ignore
                 stepCommand.ExecuteNonQuery() |> ignore
                 
