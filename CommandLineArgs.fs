@@ -82,10 +82,15 @@ module CommandLineArgs =
         let args = getArgs ()
         args |> Array.contains "--cleanup-db" || args |> Array.contains "--cleanup"
 
+    /// Check if blacklisted files cleanup should be performed
+    let shouldCleanupBlacklistedFiles () =
+        let args = getArgs ()
+        args |> Array.contains "--cleanup-blacklisted" || args |> Array.contains "--cleanup-bl"
+
     /// Check if we should skip git operations (search-only mode)
     let shouldSkipGitOperations () =
         match getSearchTerm() with
         | Some _ -> 
             // Only skip git ops if ONLY searching (no other operations requested)
-            not (shouldPullRepos() || shouldIndexFiles() || shouldShowIndexStats() || shouldCleanupDatabase())
+            not (shouldPullRepos() || shouldIndexFiles() || shouldShowIndexStats() || shouldCleanupDatabase() || shouldCleanupBlacklistedFiles())
         | None -> false

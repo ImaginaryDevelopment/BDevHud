@@ -399,16 +399,51 @@ module FileIndex =
         | ".ps1" | ".psm1" | ".psd1" -> Some "powershell"
         | _ -> None
     
-    // Get all terraform and powershell files in a repository
+    /// Directory patterns to exclude when scanning for files within repositories
+    let private fileSearchBlacklist = [
+        "node_modules";
+        "bin";
+        "obj";
+        ".git";
+        ".vs";
+        ".vscode";
+        "packages";
+        ".nuget";
+        "target";
+        "build";
+        ".gradle";
+        ".mvn";
+        "__pycache__";
+        ".pytest_cache";
+        "venv";
+        ".venv";
+        "env";
+        ".env";
+    ]
+
+    /// Check if a file path contains any blacklisted directory segments
+    let private isFileInBlacklistedDirectory (filePath: string) : bool =
+        let pathSegments = filePath.Split([| Path.DirectorySeparatorChar; Path.AltDirectorySeparatorChar |], StringSplitOptions.RemoveEmptyEntries)
+        pathSegments
+        |> Array.exists (fun segment -> 
+            fileSearchBlacklist
+            |> List.exists (fun blacklisted -> 
+                segment.Equals(blacklisted, StringComparison.OrdinalIgnoreCase)))
+
+    // Get all terraform and powershell files in a repository, excluding blacklisted directories
     let getIndexableFiles (repoPath: string) : (string * string) list =
         try
             if not (Directory.Exists(repoPath)) then []
             else
                 Directory.EnumerateFiles(repoPath, "*", SearchOption.AllDirectories)
                 |> Seq.choose (fun filePath ->
-                    match shouldIndexFile filePath with
-                    | Some fileType -> Some (filePath, fileType)
-                    | None -> None)
+                    // Skip files in blacklisted directories
+                    if isFileInBlacklistedDirectory filePath then
+                        None
+                    else
+                        match shouldIndexFile filePath with
+                        | Some fileType -> Some (filePath, fileType)
+                        | None -> None)
                 |> Seq.toList
         with
         | ex ->
@@ -876,3 +911,57 @@ module FileIndex =
         with
         | ex ->
             printfn $"Error clearing file index: {ex.Message}"
+
+    // Remove files from blacklisted directories from the database
+    let cleanupBlacklistedFiles () : unit =
+        try
+            ensureDirectoryExists()
+            use connection = new SqliteConnection($"Data Source={dbPath}")
+            connection.Open()
+            
+            // Get all indexed files to check
+            let selectCommand = "SELECT id, file_path FROM indexed_files"
+            use selectCmd = new SqliteCommand(selectCommand, connection)
+            use reader = selectCmd.ExecuteReader()
+            
+            let mutable filesToDelete = []
+            while reader.Read() do
+                let fileId = reader.["id"] :?> int64 |> int
+                let filePath = reader.["file_path"] :?> string
+                if isFileInBlacklistedDirectory filePath then
+                    filesToDelete <- fileId :: filesToDelete
+            
+            reader.Close()
+            
+            if filesToDelete.IsEmpty then
+                printfn "No blacklisted files found in database"
+            else
+                printfn $"Removing {filesToDelete.Length} files from blacklisted directories..."
+                
+                // Start transaction for cleanup
+                use transaction = connection.BeginTransaction()
+                
+                try
+                    for fileId in filesToDelete do
+                        // Delete trigrams for this file
+                        let deleteTrigramsCommand = "DELETE FROM trigrams WHERE file_id = @fileId"
+                        use deleteTrigramsCmd = new SqliteCommand(deleteTrigramsCommand, connection, transaction)
+                        deleteTrigramsCmd.Parameters.AddWithValue("@fileId", fileId) |> ignore
+                        deleteTrigramsCmd.ExecuteNonQuery() |> ignore
+                        
+                        // Delete the file record
+                        let deleteFileCommand = "DELETE FROM indexed_files WHERE id = @fileId"
+                        use deleteFileCmd = new SqliteCommand(deleteFileCommand, connection, transaction)
+                        deleteFileCmd.Parameters.AddWithValue("@fileId", fileId) |> ignore
+                        deleteFileCmd.ExecuteNonQuery() |> ignore
+                    
+                    transaction.Commit()
+                    printfn $"Successfully removed {filesToDelete.Length} blacklisted files and their trigrams"
+                with
+                | ex ->
+                    transaction.Rollback()
+                    printfn $"Error during cleanup, transaction rolled back: {ex.Message}"
+                    
+        with
+        | ex ->
+            printfn $"Error cleaning up blacklisted files: {ex.Message}"
