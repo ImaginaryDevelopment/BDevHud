@@ -60,7 +60,23 @@ module SearchOperations =
                     printfn "\n    [%d.%d] %s file:" (repoIndex + 1) (fileIndex + 1) (file.FileType.ToUpper())
                     printfn "        📄 File: %s" (RepositoryDiscovery.getFileName file.FilePath)
                     printfn "        🔗 Full path: %s" file.FilePath
-                    printfn "        � Size: %d bytes" file.FileSize))
+                    printfn "        📏 Size: %d bytes" file.FileSize
+                    
+                    // Show context lines where search term appears
+                    let lines = file.Content.Split([|'\r'; '\n'|], StringSplitOptions.RemoveEmptyEntries)
+                    let matchingLines = 
+                        lines 
+                        |> Array.indexed
+                        |> Array.filter (fun (_, line) -> line.ToLower().Contains(searchTerm.ToLower()))
+                        |> Array.truncate 3 // Show max 3 matching lines per file
+                    
+                    if matchingLines.Length > 0 then
+                        printfn "        📍 Matches:"
+                        matchingLines
+                        |> Array.iter (fun (lineNum, line) ->
+                            let trimmedLine = line.Trim()
+                            let displayLine = if trimmedLine.Length > 120 then trimmedLine.Substring(0, 117) + "..." else trimmedLine
+                            printfn "           Line %d: %s" (lineNum + 1) displayLine)))
         else
             printfn "\nNo git files found containing '%s'" searchTerm
 
@@ -91,7 +107,38 @@ module SearchOperations =
                     printfn "        🆔 Step ID: %s" step.StepId
                     printfn "        🕐 Indexed: %s" (step.IndexedAt.ToString("yyyy-MM-dd HH:mm:ss"))
                     
-                    if step.Properties.Count > 0 then
+                    // Show matching property values with context
+                    let matchingProps = 
+                        step.Properties
+                        |> Map.toList
+                        |> List.filter (fun (_, value) -> value.ToLower().Contains(searchTerm.ToLower()))
+                        |> List.truncate 3 // Show max 3 matching properties per step
+                    
+                    if matchingProps.Length > 0 then
+                        printfn "        📍 Matches in properties:"
+                        matchingProps
+                        |> List.iter (fun (key, value) ->
+                            // For multi-line values (like scripts), show the matching line
+                            let lines = value.Split([|'\r'; '\n'|], StringSplitOptions.RemoveEmptyEntries)
+                            let matchingLines = 
+                                lines 
+                                |> Array.indexed
+                                |> Array.filter (fun (_, line) -> line.ToLower().Contains(searchTerm.ToLower()))
+                                |> Array.truncate 2 // Max 2 lines per property
+                            
+                            if matchingLines.Length > 0 then
+                                printfn "           📝 %s:" key
+                                matchingLines
+                                |> Array.iter (fun (lineNum, line) ->
+                                    let trimmedLine = line.Trim()
+                                    let displayLine = if trimmedLine.Length > 100 then trimmedLine.Substring(0, 97) + "..." else trimmedLine
+                                    printfn "              Line %d: %s" (lineNum + 1) displayLine)
+                            else
+                                // Single line value
+                                let displayValue = if value.Length > 100 then value.Substring(0, 97) + "..." else value
+                                printfn "           • %s: %s" key displayValue)
+                    
+                    if step.Properties.Count > 0 && matchingProps.Length = 0 then
                         printfn "        📋 Properties (%d):" step.Properties.Count
                         step.Properties
                         |> Map.toList

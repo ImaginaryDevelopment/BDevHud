@@ -12,6 +12,7 @@ type CachedRepoInfo = {
     Path: string
     RepoName: string
     RepoUrl: string
+    CurrentBranch: string option
     LastPullAttempt: DateTime option
     LastSuccessfulPull: DateTime option
 }
@@ -119,6 +120,7 @@ module GitCache =
                 path TEXT PRIMARY KEY,
                 repo_name TEXT NOT NULL,
                 repo_url TEXT NOT NULL,
+                current_branch TEXT,
                 last_pull_attempt TEXT,
                 last_successful_pull TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -136,6 +138,19 @@ module GitCache =
         try
             use addColumnCmd = new SqliteCommand(addColumnCommand, connection)
             addColumnCmd.ExecuteNonQuery() |> ignore
+        with
+        | :? SqliteException as ex when ex.Message.Contains("duplicate column name") -> 
+            // Column already exists, ignore
+            ()
+        | _ -> reraise()
+        
+        // Add the current_branch column if it doesn't exist (migration)
+        let addBranchColumnCommand = """
+            ALTER TABLE repo_cache ADD COLUMN current_branch TEXT;
+        """
+        try
+            use addBranchCmd = new SqliteCommand(addBranchColumnCommand, connection)
+            addBranchCmd.ExecuteNonQuery() |> ignore
         with
         | :? SqliteException as ex when ex.Message.Contains("duplicate column name") -> 
             // Column already exists, ignore
@@ -160,7 +175,7 @@ module GitCache =
             connection.Open()
             
             let selectCommand = """
-                SELECT path, repo_name, repo_url, last_pull_attempt, last_successful_pull
+                SELECT path, repo_name, repo_url, current_branch, last_pull_attempt, last_successful_pull
                 FROM repo_cache 
                 WHERE path = @path
             """
@@ -193,10 +208,22 @@ module GitCache =
                         else
                             Some (DateTime.Parse(lastSuccessfulPullStr, null, System.Globalization.DateTimeStyles.RoundtripKind))
                 
+                let currentBranchObj = reader.["current_branch"]
+                let currentBranch = 
+                    if currentBranchObj = DBNull.Value then
+                        None
+                    else
+                        let branchStr = currentBranchObj :?> string
+                        if String.IsNullOrEmpty(branchStr) then
+                            None
+                        else
+                            Some branchStr
+                
                 Some {
                     Path = reader.["path"] :?> string
                     RepoName = reader.["repo_name"] :?> string
                     RepoUrl = reader.["repo_url"] :?> string
+                    CurrentBranch = currentBranch
                     LastPullAttempt = lastPullAttempt
                     LastSuccessfulPull = lastSuccessfulPull
                 }
@@ -216,11 +243,12 @@ module GitCache =
             connection.Open()
             
             let upsertCommand = """
-                INSERT INTO repo_cache (path, repo_name, repo_url, last_pull_attempt, last_successful_pull, updated_at)
-                VALUES (@path, @repo_name, @repo_url, @last_pull_attempt, @last_successful_pull, @updated_at)
+                INSERT INTO repo_cache (path, repo_name, repo_url, current_branch, last_pull_attempt, last_successful_pull, updated_at)
+                VALUES (@path, @repo_name, @repo_url, @current_branch, @last_pull_attempt, @last_successful_pull, @updated_at)
                 ON CONFLICT(path) DO UPDATE SET
                     repo_name = excluded.repo_name,
                     repo_url = excluded.repo_url,
+                    current_branch = excluded.current_branch,
                     last_pull_attempt = excluded.last_pull_attempt,
                     last_successful_pull = excluded.last_successful_pull,
                     updated_at = excluded.updated_at
@@ -231,6 +259,10 @@ module GitCache =
             command.Parameters.AddWithValue("@repo_name", repoInfo.RepoName) |> ignore
             command.Parameters.AddWithValue("@repo_url", repoInfo.RepoUrl) |> ignore
             command.Parameters.AddWithValue("@updated_at", DateTime.UtcNow.ToString("O")) |> ignore
+            
+            match repoInfo.CurrentBranch with
+            | Some branch -> command.Parameters.AddWithValue("@current_branch", branch) |> ignore
+            | None -> command.Parameters.AddWithValue("@current_branch", DBNull.Value) |> ignore
             
             match repoInfo.LastPullAttempt with
             | Some dateTime -> command.Parameters.AddWithValue("@last_pull_attempt", dateTime.ToString("O")) |> ignore
@@ -301,7 +333,7 @@ module GitCache =
             connection.Open()
             
             let selectAllCommand = """
-                SELECT path, repo_name, repo_url, last_pull_attempt, last_successful_pull
+                SELECT path, repo_name, repo_url, current_branch, last_pull_attempt, last_successful_pull
                 FROM repo_cache 
                 ORDER BY repo_name
             """
@@ -334,10 +366,22 @@ module GitCache =
                         else
                             Some (DateTime.Parse(lastSuccessfulPullStr, null, System.Globalization.DateTimeStyles.RoundtripKind))
                 
+                let currentBranchObj = reader.["current_branch"]
+                let currentBranch = 
+                    if currentBranchObj = DBNull.Value then
+                        None
+                    else
+                        let branchStr = currentBranchObj :?> string
+                        if String.IsNullOrEmpty(branchStr) then
+                            None
+                        else
+                            Some branchStr
+                
                 let repo = {
                     Path = reader.["path"] :?> string
                     RepoName = reader.["repo_name"] :?> string
                     RepoUrl = reader.["repo_url"] :?> string
+                    CurrentBranch = currentBranch
                     LastPullAttempt = lastPullAttempt
                     LastSuccessfulPull = lastSuccessfulPull
                 }

@@ -17,7 +17,7 @@ module CommandLineArgs =
     /// Check if git pull operations should be performed
     let shouldPullRepos () =
         let args = getArgs ()
-        args |> Array.contains "--pull-repos" || args |> Array.contains "--pull"
+        args |> Array.contains "--pull-repos" || args |> Array.contains "--pull" || args |> Array.contains "--git-pull"
 
     /// Check if file indexing should be performed
     let shouldIndexFiles () =

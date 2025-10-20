@@ -97,7 +97,21 @@ module GitOperations =
                             let cachedRepo = GitCache.getCachedRepo repoInfo.Path
                             let shouldPull = 
                                 match cachedRepo with
-                                | Some cached -> GitCache.shouldAttemptPull cached.LastPullAttempt
+                                | Some cached ->
+                                    // Check if branch changed - if so, force pull regardless of cooldown
+                                    let (branchSuccess, currentBranch) = GitAdapter.getCurrentBranch repoInfo.Path
+                                    let branchChanged = 
+                                        if branchSuccess then
+                                            match cached.CurrentBranch with
+                                            | Some cachedBranch -> cachedBranch <> currentBranch
+                                            | None -> false // No cached branch, don't force
+                                        else
+                                            false // Couldn't get branch, don't force
+                                    
+                                    if branchChanged then
+                                        true // Branch changed, force pull
+                                    else
+                                        GitCache.shouldAttemptPull cached.LastPullAttempt
                                 | None -> true
 
                             if shouldPull then
@@ -134,11 +148,16 @@ module GitOperations =
                             try
                                 messageQueue.Enqueue(PullStarted(repoInfo.RepoName, repoInfo.Path))
 
-                                // Update cache with attempt timestamp BEFORE trying pull
+                                // Get current branch
+                                let (branchSuccess, currentBranch) = GitAdapter.getCurrentBranch repoInfo.Path
+                                let branchName = if branchSuccess then Some currentBranch else None
+
+                                // Update cache with attempt timestamp and current branch BEFORE trying pull
                                 let cacheEntry = {
                                     Path = repoInfo.Path
                                     RepoName = repoInfo.RepoName
                                     RepoUrl = url
+                                    CurrentBranch = branchName
                                     LastPullAttempt = Some DateTime.UtcNow
                                     LastSuccessfulPull = cachedRepo |> Option.bind (fun c -> c.LastSuccessfulPull)
                                 }
@@ -223,18 +242,37 @@ module GitOperations =
                     let cachedRepo = GitCache.getCachedRepo repoInfo.Path
                     let shouldPull = 
                         match cachedRepo with
-                        | Some cached -> GitCache.shouldAttemptPull cached.LastPullAttempt
+                        | Some cached ->
+                            // Check if branch changed - if so, force pull regardless of cooldown
+                            let (branchSuccess, currentBranch) = GitAdapter.getCurrentBranch repoInfo.Path
+                            let branchChanged = 
+                                if branchSuccess then
+                                    match cached.CurrentBranch with
+                                    | Some cachedBranch -> cachedBranch <> currentBranch
+                                    | None -> false // No cached branch, don't force
+                                else
+                                    false // Couldn't get branch, don't force
+                            
+                            if branchChanged then
+                                true // Branch changed, force pull
+                            else
+                                GitCache.shouldAttemptPull cached.LastPullAttempt
                         | None -> true // No cache entry, should attempt
 
                     if shouldPull then
                         printfn "\n[%d/%d] Pulling: %s" (i + 1) repoInfos.Length repoInfo.RepoName
                         printfn "    Path: %s" repoInfo.Path
 
-                        // Update cache with attempt timestamp BEFORE trying pull
+                        // Get current branch
+                        let (branchSuccess, currentBranch) = GitAdapter.getCurrentBranch repoInfo.Path
+                        let branchName = if branchSuccess then Some currentBranch else None
+
+                        // Update cache with attempt timestamp and current branch BEFORE trying pull
                         let cacheEntry = {
                             Path = repoInfo.Path
                             RepoName = repoInfo.RepoName
                             RepoUrl = url
+                            CurrentBranch = branchName
                             LastPullAttempt = Some DateTime.UtcNow
                             LastSuccessfulPull = cachedRepo |> Option.bind (fun c -> c.LastSuccessfulPull)
                         }

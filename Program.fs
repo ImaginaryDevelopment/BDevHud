@@ -339,13 +339,15 @@ module IntegrationHandlers =
                                                 let templateResult = OctopusClient.getStepTemplate config templateId |> Async.AwaitTask |> Async.RunSynchronously
                                                 match templateResult with
                                                 | Ok templateInfo ->
-                                                    // Convert template properties to Map
+                                                    // Convert template properties to Map - include name and description for searching!
                                                     let templateProps = 
-                                                        match templateInfo.PowerShellScript with
-                                                        | Some script -> 
-                                                            Map.empty
-                                                            |> Map.add "Octopus.Action.Script.ScriptBody" script
-                                                        | None -> Map.empty
+                                                        Map.empty
+                                                        |> Map.add "Template.Name" templateInfo.Name
+                                                        |> Map.add "Template.Description" templateInfo.Description
+                                                        |> fun m ->
+                                                            match templateInfo.PowerShellScript with
+                                                            | Some script -> m |> Map.add "Octopus.Action.Script.ScriptBody" script
+                                                            | None -> m
                                                     
                                                     FileIndex.indexStepTemplate 
                                                         templateInfo.Id 
