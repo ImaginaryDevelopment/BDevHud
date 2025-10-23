@@ -1,0 +1,163 @@
+name: Test Encryption Scripts
+
+on:
+  push:
+    branches: [ master, main ]
+    paths:
+      - 'encrypt.ps1'
+      - 'decrypt.ps1'
+      - '.github/workflows/test-encryption.yml'
+  pull_request:
+    branches: [ master, main ]
+    paths:
+      - 'encrypt.ps1'
+      - 'decrypt.ps1'
+      - '.github/workflows/test-encryption.yml'
+  workflow_dispatch:
+
+jobs:
+  test-encryption:
+    runs-on: windows-latest
+    
+    env:
+      ENCRYPTION_PASSWORD: ${{ secrets.ENCRYPTION_PASSWORD }}
+      ENCRYPTION_SALT: ${{ secrets.ENCRYPTION_SALT }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Test encryption with environment variables
+      shell: pwsh
+      env:
+        TEST_SECRET: ${{ secrets.OCTOPUS_DB_USERNAME }}
+      run: |
+        Write-Host "Testing encryption/decryption with environment variables..." -ForegroundColor Cyan
+        
+        $testSecret = $env:TEST_SECRET
+        if ([string]::IsNullOrWhiteSpace($testSecret)) {
+            Write-Host "⚠️ OCTOPUS_DB_USERNAME secret not found, using fallback test value" -ForegroundColor Yellow
+            $testSecret = "MyTestSecret123!@#"
+        }
+        
+        Write-Host "Original secret: [length=$($testSecret.Length)]" -ForegroundColor Yellow
+        
+        # Encrypt using environment variables
+        $encrypted = & .\encrypt.ps1 -SecretValue $testSecret
+        Write-Host "Encrypted: $encrypted" -ForegroundColor Green
+        
+        # Decrypt using environment variables
+        Write-Host "`nDecrypting..." -ForegroundColor Cyan
+        $decrypted = & .\decrypt.ps1 -EncryptedValue $encrypted
+        
+        # Extract just the decrypted value (first line after "Decrypted value:")
+        $lines = $decrypted -split "`n"
+        $decryptedValue = $null
+        for ($i = 0; $i -lt $lines.Length; $i++) {
+            if ($lines[$i] -match "Decrypted value:") {
+                $decryptedValue = $lines[$i + 1].Trim()
+                break
+            }
+        }
+        
+        Write-Host "Decrypted: [length=$($decryptedValue.Length)]" -ForegroundColor Yellow
+        
+        # Verify round-trip
+        if ($decryptedValue -eq $testSecret) {
+            Write-Host "`n✅ SUCCESS: Encryption/decryption round-trip successful!" -ForegroundColor Green
+            exit 0
+        } else {
+            Write-Host "`n❌ FAILED: Decrypted value does not match original!" -ForegroundColor Red
+            Write-Host "Expected length: $($testSecret.Length)" -ForegroundColor Red
+            Write-Host "Got length: $($decryptedValue.Length)" -ForegroundColor Red
+            exit 1
+        }
+    
+    - name: Test encryption with explicit parameters
+      shell: pwsh
+      run: |
+        Write-Host "`nTesting encryption/decryption with explicit parameters..." -ForegroundColor Cyan
+        
+        $testSecret = "AnotherTestSecret456$%^"
+        $password = $env:ENCRYPTION_PASSWORD
+        $salt = $env:ENCRYPTION_SALT
+        
+        Write-Host "Original secret: $testSecret" -ForegroundColor Yellow
+        
+        # Encrypt with explicit parameters
+        $encrypted = & .\encrypt.ps1 -SecretValue $testSecret -Password $password -SaltString $salt
+        Write-Host "Encrypted: $encrypted" -ForegroundColor Green
+        
+        # Decrypt with explicit parameters
+        Write-Host "`nDecrypting..." -ForegroundColor Cyan
+        $decrypted = & .\decrypt.ps1 -EncryptedValue $encrypted -Password $password -SaltString $salt
+        
+        # Extract just the decrypted value
+        $lines = $decrypted -split "`n"
+        $decryptedValue = $null
+        for ($i = 0; $i -lt $lines.Length; $i++) {
+            if ($lines[$i] -match "Decrypted value:") {
+                $decryptedValue = $lines[$i + 1].Trim()
+                break
+            }
+        }
+        
+        Write-Host "Decrypted: $decryptedValue" -ForegroundColor Yellow
+        
+        # Verify round-trip
+        if ($decryptedValue -eq $testSecret) {
+            Write-Host "`n✅ SUCCESS: Encryption/decryption with explicit parameters successful!" -ForegroundColor Green
+            exit 0
+        } else {
+            Write-Host "`n❌ FAILED: Decrypted value does not match original!" -ForegroundColor Red
+            Write-Host "Expected: $testSecret" -ForegroundColor Red
+            Write-Host "Got: $decryptedValue" -ForegroundColor Red
+            exit 1
+        }
+    
+    - name: Test error handling - missing credentials
+      shell: pwsh
+      run: |
+        Write-Host "`nTesting error handling for missing credentials..." -ForegroundColor Cyan
+        
+        # Temporarily clear environment variables
+        $savedPassword = $env:ENCRYPTION_PASSWORD
+        $savedSalt = $env:ENCRYPTION_SALT
+        $env:ENCRYPTION_PASSWORD = $null
+        $env:ENCRYPTION_SALT = $null
+        
+        # Try to encrypt without credentials - should fail
+        try {
+            & .\encrypt.ps1 -SecretValue "test" 2>&1 | Out-Null
+            Write-Host "❌ FAILED: Should have thrown an error!" -ForegroundColor Red
+            exit 1
+        } catch {
+            Write-Host "✅ SUCCESS: Properly caught missing credentials error" -ForegroundColor Green
+        }
+        
+        # Restore environment variables
+        $env:ENCRYPTION_PASSWORD = $savedPassword
+        $env:ENCRYPTION_SALT = $savedSalt
+    
+    - name: Encrypt OCTO_RBXD_API_KEY
+      shell: pwsh
+      env:
+        API_KEY: ${{ secrets.OCTO_RBXD_API_KEY }}
+      run: |
+        Write-Host "`n🔐 Encrypting OCTO_RBXD_API_KEY..." -ForegroundColor Cyan
+        Write-Host "=" * 50 -ForegroundColor Cyan
+        
+        if ([string]::IsNullOrWhiteSpace($env:API_KEY)) {
+            Write-Host "⚠️ OCTO_RBXD_API_KEY secret not found - skipping" -ForegroundColor Yellow
+            exit 0
+        }
+        
+        Write-Host "API Key length: $($env:API_KEY.Length)" -ForegroundColor Yellow
+        
+        # Encrypt the API key
+        $encrypted = & .\encrypt.ps1 -SecretValue $env:API_KEY
+        
+        Write-Host "`n✅ Encrypted OCTO_RBXD_API_KEY:" -ForegroundColor Green
+        Write-Host $encrypted -ForegroundColor White
+        Write-Host "`n💡 Save this encrypted value to use in your workflows!" -ForegroundColor Cyan
+        Write-Host "=" * 50 -ForegroundColor Cyan
