@@ -122,6 +122,20 @@ module CommandLineArgs =
         let args = getArgs ()
         args |> Array.contains "--cleanup-blacklisted" || args |> Array.contains "--cleanup-bl"
 
+    /// Get update remote parameters (search string and target string)
+    let getUpdateRemoteParams () =
+        let args = getArgs ()
+        // Look for --update-remote=search,target pattern
+        args
+        |> Array.tryFind (fun arg -> arg.StartsWith("--update-remote="))
+        |> Option.bind (fun arg -> 
+            let value = arg.Substring(16) // Remove "--update-remote=" prefix
+            let parts = value.Split(',')
+            if parts.Length = 2 then
+                Some (parts.[0], parts.[1])
+            else
+                None)
+
     /// Check if we should skip git operations (search-only mode or database-only operations)
     let shouldSkipGitOperations () =
         let hasAnySearch = getSearchTerm().IsSome || getSearchGitTerm().IsSome || getSearchOctoTerm().IsSome

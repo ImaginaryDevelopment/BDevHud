@@ -433,6 +433,35 @@ module Program =
         // Perform git pull operations if requested (using parallel processing)
         GitOperations.performParallelGitPulls repoInfos
 
+        // Handle update remote URLs if requested
+        match CommandLineArgs.getUpdateRemoteParams() with
+        | Some (searchString, targetString) ->
+            if repoInfos.IsEmpty then
+                printfn "\n⚠️ No repositories found to update remotes"
+            else
+                printfn "\n🔄 Updating git remote URLs..."
+                printfn "   Search: %s" searchString
+                printfn "   Target: %s" targetString
+                printfn ""
+                
+                let mutable totalUpdated = 0
+                let mutable totalErrors = 0
+                
+                for repoInfo in repoInfos do
+                    let (success, message, updatedCount) = GitAdapter.updateRemoteUrls repoInfo.Path searchString targetString
+                    
+                    if updatedCount > 0 then
+                        printfn "✅ %s: %s" repoInfo.RepoName message
+                        totalUpdated <- totalUpdated + updatedCount
+                    elif not success then
+                        printfn "❌ %s: %s" repoInfo.RepoName message
+                        totalErrors <- totalErrors + 1
+                
+                printfn "\n📊 Summary: Updated %d remote(s) across repositories" totalUpdated
+                if totalErrors > 0 then
+                    printfn "   Errors: %d" totalErrors
+        | None -> ()
+
         // Perform file indexing if requested
         if CommandLineArgs.shouldIndexFiles() then
             FileIndexingOperations.performFileIndexing repoInfos

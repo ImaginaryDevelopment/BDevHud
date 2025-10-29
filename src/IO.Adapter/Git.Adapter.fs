@@ -291,3 +291,84 @@ module GitAdapter =
                 "unknown"
         with _ ->
             "unknown"
+
+    /// Updates git remote URLs by replacing a search string with a target string
+    /// Returns (success, message, updatedCount)
+    let updateRemoteUrls (folderPath: string) (searchString: string) (targetString: string) : (bool * string * int) =
+        try
+            if not (isGitRepository folderPath) then
+                (false, "Not a git repository", 0)
+            else
+                let remoteResult = getRemote folderPath
+                
+                if not remoteResult.Success then
+                    (false, remoteResult.Error, 0)
+                else
+                    // Find remotes that need updating
+                    let remotesToUpdate =
+                        remoteResult.Remotes
+                        |> List.filter (fun r -> r.Url.Contains(searchString))
+                        |> List.distinctBy (fun r -> r.Name) // Only update each remote name once
+                    
+                    if remotesToUpdate.IsEmpty then
+                        (true, $"No remotes found containing '{searchString}'", 0)
+                    else
+                        let mutable updatedCount = 0
+                        let mutable errors = []
+                        
+                        for remote in remotesToUpdate do
+                            let newUrl = remote.Url.Replace(searchString, targetString)
+                            
+                            try
+                                let startInfo = ProcessStartInfo()
+                                startInfo.FileName <- "git"
+                                startInfo.Arguments <- $"remote set-url {remote.Name} {newUrl}"
+                                startInfo.WorkingDirectory <- folderPath
+                                startInfo.UseShellExecute <- false
+                                startInfo.RedirectStandardOutput <- true
+                                startInfo.RedirectStandardError <- true
+                                startInfo.CreateNoWindow <- true
+
+                                use gitProcess = new Process()
+                                gitProcess.StartInfo <- startInfo
+
+                                let output = System.Text.StringBuilder()
+                                let error = System.Text.StringBuilder()
+
+                                gitProcess.OutputDataReceived.Add(fun e ->
+                                    if not (String.IsNullOrEmpty(e.Data)) then
+                                        output.AppendLine(e.Data) |> ignore)
+
+                                gitProcess.ErrorDataReceived.Add(fun e ->
+                                    if not (String.IsNullOrEmpty(e.Data)) then
+                                        error.AppendLine(e.Data) |> ignore)
+
+                                let started = gitProcess.Start()
+
+                                if started then
+                                    gitProcess.BeginOutputReadLine()
+                                    gitProcess.BeginErrorReadLine()
+
+                                    let completed = gitProcess.WaitForExit(5000) // 5 second timeout
+
+                                    if completed then
+                                        if gitProcess.ExitCode = 0 then
+                                            updatedCount <- updatedCount + 1
+                                        else
+                                            let errorStr = error.ToString().Trim()
+                                            errors <- $"Failed to update {remote.Name}: {errorStr}" :: errors
+                                    else
+                                        gitProcess.Kill()
+                                        errors <- $"Timeout updating {remote.Name}" :: errors
+                                else
+                                    errors <- $"Failed to start git process for {remote.Name}" :: errors
+                            with ex ->
+                                errors <- $"Exception updating {remote.Name}: {ex.Message}" :: errors
+                        
+                        if errors.IsEmpty then
+                            (true, $"Updated {updatedCount} remote(s)", updatedCount)
+                        else
+                            let errorMsg = String.concat "; " (List.rev errors)
+                            (false, $"Updated {updatedCount} remote(s) with errors: {errorMsg}", updatedCount)
+        with ex ->
+            (false, $"Exception: {ex.Message}", 0)
