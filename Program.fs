@@ -5,6 +5,7 @@ open System.IO
 open IO.Adapter
 open Octo.Adapter
 open SqlLite.Adapter
+open GitHub.Adapter
 
 // =============================================================================
 // OCTOPUS OPERATIONS MODULE  
@@ -72,6 +73,93 @@ module GitHubOperations =
 // =============================================================================
 
 module IntegrationHandlers =
+    /// Handle listing GitHub repositories if requested
+    let handleListGitHubRepos () =
+        if not (CommandLineArgs.shouldListGitHubRepos()) then
+            ()
+        else
+            printfn "\n%s" (String.replicate 50 "=")
+            printfn "GitHub Repository List"
+            printfn "%s" (String.replicate 50 "=")
+
+            // Get token from command line or environment
+            let githubToken = 
+                match CommandLineArgs.getGitHubToken() with
+                | Some token -> Some token
+                | None -> 
+                    let envToken = Environment.GetEnvironmentVariable("GITHUB_TOKEN")
+                    if String.IsNullOrEmpty(envToken) then None else Some envToken
+
+            // Get organization filter
+            let orgFilter = CommandLineArgs.getGitHubOrg()
+
+            match githubToken with
+            | Some token ->
+                printfn "🔑 Using GitHub token for authentication"
+                
+                match orgFilter with
+                | Some org -> printfn "🏢 Filtering by organization: %s" org
+                | None -> printfn "📡 Fetching all accessible repositories..."
+                
+                printfn "🌐 API Endpoint: https://api.github.com/user/repos\n"
+
+                try
+                    let config = { GitHubConfig.Token = Some token; UserAgent = "BDevHud" }
+                    
+                    printfn "⏳ Fetching repositories from GitHub API..."
+                    let repos = 
+                        GitHubAdapter.getRepositories config None 
+                        |> Async.AwaitTask
+                        |> Async.RunSynchronously
+                    
+                    printfn "✅ Retrieved %d repositories from API\n" repos.Length
+
+                    // Filter by organization if specified
+                    let filteredRepos =
+                        match orgFilter with
+                        | Some org -> 
+                            let filtered = repos |> List.filter (fun r -> r.Owner.Equals(org, StringComparison.OrdinalIgnoreCase))
+                            printfn "🔍 Filtered to %d repositories in organization '%s'\n" filtered.Length org
+                            filtered
+                        | None -> repos
+
+                    if filteredRepos.IsEmpty then
+                        printfn "⚠️ No repositories found"
+                    else
+                        printfn "📊 Found %d repositories:\n" filteredRepos.Length
+
+                        filteredRepos
+                        |> List.sortBy (fun r -> r.FullName.ToLower())
+                        |> List.iteri (fun i repo ->
+                            let visibility = if repo.IsPrivate then "🔒 Private" else "🌐 Public"
+                            let fork = if repo.IsFork then " [Fork]" else ""
+                            let lang = match repo.Language with | Some l -> $" ({l})" | None -> ""
+                            
+                            printfn "%3d. %s %s%s%s" (i + 1) repo.FullName visibility fork lang
+                            if not (String.IsNullOrEmpty(repo.Description)) then
+                                printfn "     %s" repo.Description
+                            printfn "     Clone: %s" repo.CloneUrl
+                            printfn "")
+
+                        printfn "\n📈 Summary:"
+                        let privateCount = filteredRepos |> List.filter (fun r -> r.IsPrivate) |> List.length
+                        let publicCount = filteredRepos.Length - privateCount
+                        let forkCount = filteredRepos |> List.filter (fun r -> r.IsFork) |> List.length
+                        printfn "  Private: %d | Public: %d | Forks: %d" privateCount publicCount forkCount
+
+                        // TODO: Save to database
+                        printfn "\n💾 Database storage coming soon..."
+
+                with ex ->
+                    printfn "❌ Error fetching repositories: %s" ex.Message
+
+            | None ->
+                printfn "❌ No GitHub token provided"
+                printfn "Please provide a token using:"
+                printfn "  --github-token=<your-token>"
+                printfn "  or set GITHUB_TOKEN environment variable"
+                printfn "\nOptional: Filter by organization with --github-org=<org-name>"
+
     /// Handle GitHub integration if requested
     let handleGitHubIntegration () =
         if not (CommandLineArgs.shouldRunGitHub()) then
@@ -426,6 +514,7 @@ module Program =
                 GitOperations.displayGitFolders gitFolders
 
         // Handle integrations based on command line flags
+        IntegrationHandlers.handleListGitHubRepos ()
         IntegrationHandlers.handleGitHubIntegration ()
         IntegrationHandlers.handleOctopusIntegration ()
         IntegrationHandlers.handleOctopusIndexing ()

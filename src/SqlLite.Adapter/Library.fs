@@ -35,6 +35,24 @@ type TrigramEntry = {
     Position: int
 }
 
+// GitHub repository entry
+type GitHubRepo = {
+    Id: int64
+    FullName: string
+    Name: string
+    Owner: string
+    Description: string
+    CloneUrl: string
+    SshUrl: string
+    IsPrivate: bool
+    IsFork: bool
+    Language: string option
+    CreatedAt: DateTime
+    UpdatedAt: DateTime
+    PushedAt: DateTime option
+    IndexedAt: DateTime
+}
+
 // Octopus deployment step entry
 type OctopusStep = {
     Id: int

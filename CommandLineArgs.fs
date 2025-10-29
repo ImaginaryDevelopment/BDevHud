@@ -77,6 +77,25 @@ module CommandLineArgs =
         |> Array.tryFind (fun arg -> arg.StartsWith("--octopus-api-key="))
         |> Option.map (fun arg -> arg.Substring(18)) // Remove "--octopus-api-key=" prefix
 
+    /// Get GitHub token from command line args
+    let getGitHubToken () =
+        let args = getArgs ()
+        args
+        |> Array.tryFind (fun arg -> arg.StartsWith("--github-token="))
+        |> Option.map (fun arg -> arg.Substring(15)) // Remove "--github-token=" prefix
+
+    /// Check if we should list GitHub repositories
+    let shouldListGitHubRepos () =
+        let args = getArgs ()
+        args |> Array.contains "--list-github-repos" || args |> Array.contains "--github-repos"
+
+    /// Get GitHub organization filter from command line args
+    let getGitHubOrg () =
+        let args = getArgs ()
+        args
+        |> Array.tryFind (fun arg -> arg.StartsWith("--github-org="))
+        |> Option.map (fun arg -> arg.Substring(13)) // Remove "--github-org=" prefix
+
     /// Get root directory from command line args or environment variable
     let getRootDirectory () =
         let args = getArgs ()
@@ -139,12 +158,13 @@ module CommandLineArgs =
     /// Check if we should skip git operations (search-only mode or database-only operations)
     let shouldSkipGitOperations () =
         let hasAnySearch = getSearchTerm().IsSome || getSearchGitTerm().IsSome || getSearchOctoTerm().IsSome
-        match hasAnySearch with
-        | true -> 
-            // Skip git ops if ONLY searching (no other operations that need repos)
+        let hasGitHubRepoListing = shouldListGitHubRepos()
+        
+        if hasGitHubRepoListing then
+            true
+        elif hasAnySearch then
             not (shouldPullRepos() || shouldIndexFiles())
-        | false -> 
-            // Skip git ops if ONLY doing database operations that don't need repos
+        else
             let databaseOnlyOps = shouldShowIndexStats() || shouldCleanupDatabase() || shouldCleanupBlacklistedFiles()
             let repoRequiredOps = shouldPullRepos() || shouldIndexFiles()
             databaseOnlyOps && not repoRequiredOps
