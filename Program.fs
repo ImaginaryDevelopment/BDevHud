@@ -106,13 +106,16 @@ module IntegrationHandlers =
                 try
                     let config = { GitHubConfig.Token = Some token; UserAgent = "BDevHud" }
                     
+                    let stopwatch = System.Diagnostics.Stopwatch.StartNew()
                     printfn "⏳ Fetching repositories from GitHub API..."
+                    
                     let repos = 
                         GitHubAdapter.getRepositories config None 
                         |> Async.AwaitTask
                         |> Async.RunSynchronously
                     
-                    printfn "✅ Retrieved %d repositories from API\n" repos.Length
+                    stopwatch.Stop()
+                    printfn "✅ Retrieved %d repositories from API (took %d seconds)\n" repos.Length (int stopwatch.Elapsed.TotalSeconds)
 
                     // Filter by organization if specified
                     let filteredRepos =
@@ -147,8 +150,31 @@ module IntegrationHandlers =
                         let forkCount = filteredRepos |> List.filter (fun r -> r.IsFork) |> List.length
                         printfn "  Private: %d | Public: %d | Forks: %d" privateCount publicCount forkCount
 
-                        // TODO: Save to database
-                        printfn "\n💾 Database storage coming soon..."
+                        // Save to database
+                        printfn "\n💾 Saving repositories to database..."
+                        let saveStopwatch = System.Diagnostics.Stopwatch.StartNew()
+                        
+                        for repo in filteredRepos do
+                            let dbRepo = {
+                                GitHubRepo.Id = repo.Id
+                                FullName = repo.FullName
+                                Name = repo.Name
+                                Owner = repo.Owner
+                                Description = repo.Description
+                                CloneUrl = repo.CloneUrl
+                                SshUrl = repo.SshUrl
+                                IsPrivate = repo.IsPrivate
+                                IsFork = repo.IsFork
+                                Language = repo.Language
+                                CreatedAt = repo.CreatedAt
+                                UpdatedAt = repo.UpdatedAt
+                                PushedAt = repo.PushedAt
+                                IndexedAt = DateTime.UtcNow
+                            }
+                            GitHubRepoIndex.upsertRepository dbRepo
+                        
+                        saveStopwatch.Stop()
+                        printfn "✅ Saved %d repositories to database (took %.1f seconds)" filteredRepos.Length saveStopwatch.Elapsed.TotalSeconds
 
                 with ex ->
                     printfn "❌ Error fetching repositories: %s" ex.Message
@@ -159,6 +185,57 @@ module IntegrationHandlers =
                 printfn "  --github-token=<your-token>"
                 printfn "  or set GITHUB_TOKEN environment variable"
                 printfn "\nOptional: Filter by organization with --github-org=<org-name>"
+
+    /// Handle displaying GitHub repositories from database
+    let handleDisplayGitHubRepos () =
+        if not (CommandLineArgs.shouldDisplayGitHubRepos()) then
+            ()
+        else
+            printfn "\n%s" (String.replicate 50 "=")
+            printfn "GitHub Repositories from Database"
+            printfn "%s" (String.replicate 50 "=")
+
+            // Get organization filter
+            let orgFilter = CommandLineArgs.getGitHubOrg()
+
+            let repos =
+                match orgFilter with
+                | Some org ->
+                    printfn "🏢 Filtering by organization: %s\n" org
+                    GitHubRepoIndex.getRepositoriesByOwner org
+                | None ->
+                    printfn "📡 Loading all repositories from database...\n"
+                    GitHubRepoIndex.getAllRepositories()
+
+            if repos.IsEmpty then
+                printfn "⚠️ No repositories found in database"
+                printfn "\nTo index repositories, use:"
+                printfn "  --list-github-repos --github-token=<your-token>"
+            else
+                printfn "📊 Found %d repositories:\n" repos.Length
+
+                repos
+                |> List.sortBy (fun r -> r.FullName.ToLower())
+                |> List.iteri (fun i repo ->
+                    let visibility = if repo.IsPrivate then "🔒 Private" else "🌐 Public"
+                    let fork = if repo.IsFork then " [Fork]" else ""
+                    let lang = match repo.Language with | Some l -> $" ({l})" | None -> ""
+                    
+                    printfn "%3d. %s %s%s%s" (i + 1) repo.FullName visibility fork lang
+                    if not (String.IsNullOrEmpty(repo.Description)) then
+                        printfn "     %s" repo.Description
+                    printfn "     Clone: %s" repo.CloneUrl
+                    printfn "     Indexed: %s" (repo.IndexedAt.ToString("yyyy-MM-dd HH:mm"))
+                    printfn "")
+
+                printfn "\n📈 Summary:"
+                let privateCount = repos |> List.filter (fun r -> r.IsPrivate) |> List.length
+                let publicCount = repos.Length - privateCount
+                let forkCount = repos |> List.filter (fun r -> r.IsFork) |> List.length
+                printfn "  Private: %d | Public: %d | Forks: %d" privateCount publicCount forkCount
+                
+                let distinctOrgs = repos |> List.map (fun r -> r.Owner) |> List.distinct |> List.length
+                printfn "  Organizations: %d" distinctOrgs
 
     /// Handle GitHub integration if requested
     let handleGitHubIntegration () =
@@ -515,6 +592,7 @@ module Program =
 
         // Handle integrations based on command line flags
         IntegrationHandlers.handleListGitHubRepos ()
+        IntegrationHandlers.handleDisplayGitHubRepos ()
         IntegrationHandlers.handleGitHubIntegration ()
         IntegrationHandlers.handleOctopusIntegration ()
         IntegrationHandlers.handleOctopusIndexing ()

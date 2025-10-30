@@ -1484,3 +1484,230 @@ module FileIndex =
         | ex ->
             printfn $"Error getting Octopus index stats: {ex.Message}"
             (0, 0, [])
+
+/// GitHub repository indexing and storage functionality
+module GitHubRepoIndex =
+    
+    let private dbPath = FileIndex.dbPath
+    
+    // Ensure the directory exists
+    let private ensureDirectoryExists () =
+        let dir = Path.GetDirectoryName(dbPath)
+        if not (Directory.Exists(dir)) then
+            Directory.CreateDirectory(dir) |> ignore
+    
+    // Ensure GitHub repos table exists
+    let private initializeGitHubTable () =
+        ensureDirectoryExists()
+        
+        use connection = new SqliteConnection($"Data Source={dbPath}")
+        connection.Open()
+        
+        let createTableCommand = """
+            CREATE TABLE IF NOT EXISTS github_repos (
+                id INTEGER PRIMARY KEY,
+                github_id INTEGER NOT NULL UNIQUE,
+                full_name TEXT NOT NULL COLLATE NOCASE,
+                name TEXT NOT NULL COLLATE NOCASE,
+                owner TEXT NOT NULL COLLATE NOCASE,
+                description TEXT COLLATE NOCASE,
+                clone_url TEXT NOT NULL,
+                ssh_url TEXT NOT NULL,
+                is_private INTEGER NOT NULL,
+                is_fork INTEGER NOT NULL,
+                language TEXT COLLATE NOCASE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                pushed_at TEXT,
+                indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """
+        
+        use command = new SqliteCommand(createTableCommand, connection)
+        command.ExecuteNonQuery() |> ignore
+        
+        // Create index for searching
+        let createIndexCommand = """
+            CREATE INDEX IF NOT EXISTS idx_github_repos_owner ON github_repos(owner)
+        """
+        use indexCommand = new SqliteCommand(createIndexCommand, connection)
+        indexCommand.ExecuteNonQuery() |> ignore
+    
+    /// Insert or update a GitHub repository
+    let upsertRepository (repo: GitHubRepo) : unit =
+        try
+            initializeGitHubTable()
+            
+            use connection = new SqliteConnection($"Data Source={dbPath}")
+            connection.Open()
+            
+            let upsertCommand = """
+                INSERT OR REPLACE INTO github_repos 
+                (github_id, full_name, name, owner, description, clone_url, ssh_url, 
+                 is_private, is_fork, language, created_at, updated_at, pushed_at, indexed_at)
+                VALUES 
+                (@github_id, @full_name, @name, @owner, @description, @clone_url, @ssh_url,
+                 @is_private, @is_fork, @language, @created_at, @updated_at, @pushed_at, @indexed_at)
+            """
+            
+            use command = new SqliteCommand(upsertCommand, connection)
+            command.Parameters.AddWithValue("@github_id", repo.Id) |> ignore
+            command.Parameters.AddWithValue("@full_name", repo.FullName) |> ignore
+            command.Parameters.AddWithValue("@name", repo.Name) |> ignore
+            command.Parameters.AddWithValue("@owner", repo.Owner) |> ignore
+            command.Parameters.AddWithValue("@description", repo.Description) |> ignore
+            command.Parameters.AddWithValue("@clone_url", repo.CloneUrl) |> ignore
+            command.Parameters.AddWithValue("@ssh_url", repo.SshUrl) |> ignore
+            command.Parameters.AddWithValue("@is_private", if repo.IsPrivate then 1 else 0) |> ignore
+            command.Parameters.AddWithValue("@is_fork", if repo.IsFork then 1 else 0) |> ignore
+            command.Parameters.AddWithValue("@language", repo.Language |> Option.defaultValue "") |> ignore
+            command.Parameters.AddWithValue("@created_at", repo.CreatedAt.ToString("O")) |> ignore
+            command.Parameters.AddWithValue("@updated_at", repo.UpdatedAt.ToString("O")) |> ignore
+            command.Parameters.AddWithValue("@pushed_at", 
+                match repo.PushedAt with 
+                | Some dt -> box (dt.ToString("O"))
+                | None -> box DBNull.Value) |> ignore
+            command.Parameters.AddWithValue("@indexed_at", repo.IndexedAt.ToString("O")) |> ignore
+            
+            command.ExecuteNonQuery() |> ignore
+        with
+        | ex ->
+            printfn $"Error upserting repository {repo.FullName}: {ex.Message}"
+    
+    /// Get all stored GitHub repositories
+    let getAllRepositories () : GitHubRepo list =
+        try
+            initializeGitHubTable()
+            
+            use connection = new SqliteConnection($"Data Source={dbPath}")
+            connection.Open()
+            
+            let selectCommand = """
+                SELECT github_id, full_name, name, owner, description, clone_url, ssh_url,
+                       is_private, is_fork, language, created_at, updated_at, pushed_at, indexed_at
+                FROM github_repos
+                ORDER BY full_name
+            """
+            
+            use command = new SqliteCommand(selectCommand, connection)
+            use reader = command.ExecuteReader()
+            
+            let mutable repos = []
+            
+            while reader.Read() do
+                let language = 
+                    let langValue = reader.["language"]
+                    if langValue = box DBNull.Value || String.IsNullOrEmpty(langValue :?> string) then
+                        None
+                    else
+                        Some (langValue :?> string)
+                
+                let pushedAt =
+                    let pushedValue = reader.["pushed_at"]
+                    if pushedValue = box DBNull.Value then
+                        None
+                    else
+                        Some (DateTime.Parse(pushedValue :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind))
+                
+                let repo = {
+                    Id = reader.["github_id"] :?> int64
+                    FullName = reader.["full_name"] :?> string
+                    Name = reader.["name"] :?> string
+                    Owner = reader.["owner"] :?> string
+                    Description = reader.["description"] :?> string
+                    CloneUrl = reader.["clone_url"] :?> string
+                    SshUrl = reader.["ssh_url"] :?> string
+                    IsPrivate = (reader.["is_private"] :?> int64) = 1L
+                    IsFork = (reader.["is_fork"] :?> int64) = 1L
+                    Language = language
+                    CreatedAt = DateTime.Parse(reader.["created_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                    UpdatedAt = DateTime.Parse(reader.["updated_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                    PushedAt = pushedAt
+                    IndexedAt = DateTime.Parse(reader.["indexed_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                }
+                repos <- repo :: repos
+            
+            List.rev repos
+        with
+        | ex ->
+            printfn $"Error getting all repositories: {ex.Message}"
+            []
+    
+    /// Get repositories by owner/organization
+    let getRepositoriesByOwner (owner: string) : GitHubRepo list =
+        try
+            initializeGitHubTable()
+            
+            use connection = new SqliteConnection($"Data Source={dbPath}")
+            connection.Open()
+            
+            let selectCommand = """
+                SELECT github_id, full_name, name, owner, description, clone_url, ssh_url,
+                       is_private, is_fork, language, created_at, updated_at, pushed_at, indexed_at
+                FROM github_repos
+                WHERE owner = @owner COLLATE NOCASE
+                ORDER BY name
+            """
+            
+            use command = new SqliteCommand(selectCommand, connection)
+            command.Parameters.AddWithValue("@owner", owner) |> ignore
+            
+            use reader = command.ExecuteReader()
+            
+            let mutable repos = []
+            
+            while reader.Read() do
+                let language = 
+                    let langValue = reader.["language"]
+                    if langValue = box DBNull.Value || String.IsNullOrEmpty(langValue :?> string) then
+                        None
+                    else
+                        Some (langValue :?> string)
+                
+                let pushedAt =
+                    let pushedValue = reader.["pushed_at"]
+                    if pushedValue = box DBNull.Value then
+                        None
+                    else
+                        Some (DateTime.Parse(pushedValue :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind))
+                
+                let repo = {
+                    Id = reader.["github_id"] :?> int64
+                    FullName = reader.["full_name"] :?> string
+                    Name = reader.["name"] :?> string
+                    Owner = reader.["owner"] :?> string
+                    Description = reader.["description"] :?> string
+                    CloneUrl = reader.["clone_url"] :?> string
+                    SshUrl = reader.["ssh_url"] :?> string
+                    IsPrivate = (reader.["is_private"] :?> int64) = 1L
+                    IsFork = (reader.["is_fork"] :?> int64) = 1L
+                    Language = language
+                    CreatedAt = DateTime.Parse(reader.["created_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                    UpdatedAt = DateTime.Parse(reader.["updated_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                    PushedAt = pushedAt
+                    IndexedAt = DateTime.Parse(reader.["indexed_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                }
+                repos <- repo :: repos
+            
+            List.rev repos
+        with
+        | ex ->
+            printfn $"Error getting repositories for owner {owner}: {ex.Message}"
+            []
+    
+    /// Get repository count
+    let getRepositoryCount () : int =
+        try
+            initializeGitHubTable()
+            
+            use connection = new SqliteConnection($"Data Source={dbPath}")
+            connection.Open()
+            
+            let countCommand = "SELECT COUNT(*) FROM github_repos"
+            use command = new SqliteCommand(countCommand, connection)
+            let count = command.ExecuteScalar() :?> int64
+            int count
+        with
+        | ex ->
+            printfn $"Error getting repository count: {ex.Message}"
+            0

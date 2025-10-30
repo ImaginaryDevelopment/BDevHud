@@ -96,6 +96,11 @@ module CommandLineArgs =
         |> Array.tryFind (fun arg -> arg.StartsWith("--github-org="))
         |> Option.map (fun arg -> arg.Substring(13)) // Remove "--github-org=" prefix
 
+    /// Check if we should display GitHub repositories from database
+    let shouldDisplayGitHubRepos () =
+        let args = getArgs ()
+        args |> Array.contains "--display-github-repos" || args |> Array.contains "--show-github-repos"
+
     /// Get root directory from command line args or environment variable
     let getRootDirectory () =
         let args = getArgs ()
@@ -159,8 +164,9 @@ module CommandLineArgs =
     let shouldSkipGitOperations () =
         let hasAnySearch = getSearchTerm().IsSome || getSearchGitTerm().IsSome || getSearchOctoTerm().IsSome
         let hasGitHubRepoListing = shouldListGitHubRepos()
+        let hasGitHubRepoDisplay = shouldDisplayGitHubRepos()
         
-        if hasGitHubRepoListing then
+        if hasGitHubRepoListing || hasGitHubRepoDisplay then
             true
         elif hasAnySearch then
             not (shouldPullRepos() || shouldIndexFiles())
