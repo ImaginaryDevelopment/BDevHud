@@ -21,6 +21,21 @@ type GitHubRepository =
       Language: string option
       Owner: string }
 
+/// GitHub repository secret information (metadata only, values are not accessible)
+type GitHubRepositorySecret =
+    { Name: string
+      CreatedAt: DateTime
+      UpdatedAt: DateTime }
+
+/// GitHub Actions runner information
+type GitHubRunner =
+    { Id: int64
+      Name: string
+      Os: string
+      Status: string
+      Busy: bool
+      Labels: string list }
+
 /// GitHub configuration
 type GitHubConfig =
     { Token: string option
@@ -185,4 +200,61 @@ module GitHubAdapter =
             with ex ->
                 printfn $"Error fetching repository {owner}/{repoName}: {ex.Message}"
                 return None
+        }
+
+    /// Get repository secrets count (requires admin access)
+    /// Note: Secret values are never returned, only names and metadata
+    let getRepositorySecretsCount (config: GitHubConfig) (owner: string) (repoName: string) : Task<int> =
+        task {
+            try
+                use httpClient = new System.Net.Http.HttpClient()
+                httpClient.DefaultRequestHeaders.Add("User-Agent", config.UserAgent)
+                
+                match config.Token with
+                | Some token -> 
+                    httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {token}")
+                | None -> ()
+                
+                let url = $"https://api.github.com/repos/{owner}/{repoName}/actions/secrets"
+                let! response = httpClient.GetAsync(url)
+                
+                if response.IsSuccessStatusCode then
+                    let! content = response.Content.ReadAsStringAsync()
+                    // Parse JSON to count secrets
+                    let json = System.Text.Json.JsonDocument.Parse(content)
+                    let secrets = json.RootElement.GetProperty("total_count")
+                    return secrets.GetInt32()
+                else
+                    // Likely permission issue or repo doesn't have Actions enabled
+                    return 0
+            with ex ->
+                // Silent fail for permission issues
+                return 0
+        }
+
+    /// Get self-hosted runners count for a repository (requires admin access)
+    let getRepositoryRunnersCount (config: GitHubConfig) (owner: string) (repoName: string) : Task<int> =
+        task {
+            try
+                use httpClient = new System.Net.Http.HttpClient()
+                httpClient.DefaultRequestHeaders.Add("User-Agent", config.UserAgent)
+                
+                match config.Token with
+                | Some token -> 
+                    httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {token}")
+                | None -> ()
+                
+                let url = $"https://api.github.com/repos/{owner}/{repoName}/actions/runners"
+                let! response = httpClient.GetAsync(url)
+                
+                if response.IsSuccessStatusCode then
+                    let! content = response.Content.ReadAsStringAsync()
+                    // Parse JSON to count runners
+                    let json = System.Text.Json.JsonDocument.Parse(content)
+                    let runners = json.RootElement.GetProperty("total_count")
+                    return runners.GetInt32()
+                else
+                    return 0
+            with ex ->
+                return 0
         }

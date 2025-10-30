@@ -101,6 +101,18 @@ module CommandLineArgs =
         let args = getArgs ()
         args |> Array.contains "--display-github-repos" || args |> Array.contains "--show-github-repos"
 
+    /// Check if we should query GitHub secrets and runners
+    let shouldQueryGitHubMetadata () =
+        let args = getArgs ()
+        args |> Array.contains "--query-github-metadata" || args |> Array.contains "--github-metadata"
+
+    /// Get GitHub repo search term from command line args
+    let getGitHubRepoSearch () =
+        let args = getArgs ()
+        args
+        |> Array.tryFind (fun arg -> arg.StartsWith("--search-github-repos="))
+        |> Option.map (fun arg -> arg.Substring(22)) // Remove "--search-github-repos=" prefix
+
     /// Get root directory from command line args or environment variable
     let getRootDirectory () =
         let args = getArgs ()
@@ -165,8 +177,9 @@ module CommandLineArgs =
         let hasAnySearch = getSearchTerm().IsSome || getSearchGitTerm().IsSome || getSearchOctoTerm().IsSome
         let hasGitHubRepoListing = shouldListGitHubRepos()
         let hasGitHubRepoDisplay = shouldDisplayGitHubRepos()
+        let hasGitHubMetadataQuery = shouldQueryGitHubMetadata()
         
-        if hasGitHubRepoListing || hasGitHubRepoDisplay then
+        if hasGitHubRepoListing || hasGitHubRepoDisplay || hasGitHubMetadataQuery then
             true
         elif hasAnySearch then
             not (shouldPullRepos() || shouldIndexFiles())

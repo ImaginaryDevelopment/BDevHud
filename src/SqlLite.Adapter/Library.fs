@@ -51,6 +51,8 @@ type GitHubRepo = {
     UpdatedAt: DateTime
     PushedAt: DateTime option
     IndexedAt: DateTime
+    SecretsCount: int option
+    RunnersCount: int option
 }
 
 // Octopus deployment step entry
@@ -1519,12 +1521,32 @@ module GitHubRepoIndex =
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 pushed_at TEXT,
-                indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                secrets_count INTEGER,
+                runners_count INTEGER
             )
         """
         
         use command = new SqliteCommand(createTableCommand, connection)
         command.ExecuteNonQuery() |> ignore
+        
+        // Migration: Add secrets_count and runners_count columns if they don't exist
+        try
+            let alterTableCommand1 = "ALTER TABLE github_repos ADD COLUMN secrets_count INTEGER"
+            use alterCmd1 = new SqliteCommand(alterTableCommand1, connection)
+            alterCmd1.ExecuteNonQuery() |> ignore
+        with
+        | :? SqliteException as ex when ex.Message.Contains("duplicate column name") -> ()
+        | _ -> ()
+        
+        try
+            let alterTableCommand2 = "ALTER TABLE github_repos ADD COLUMN runners_count INTEGER"
+            use alterCmd2 = new SqliteCommand(alterTableCommand2, connection)
+            alterCmd2.ExecuteNonQuery() |> ignore
+        with
+        | :? SqliteException as ex when ex.Message.Contains("duplicate column name") -> ()
+        | _ -> ()
+
         
         // Create index for searching
         let createIndexCommand = """
@@ -1544,10 +1566,12 @@ module GitHubRepoIndex =
             let upsertCommand = """
                 INSERT OR REPLACE INTO github_repos 
                 (github_id, full_name, name, owner, description, clone_url, ssh_url, 
-                 is_private, is_fork, language, created_at, updated_at, pushed_at, indexed_at)
+                 is_private, is_fork, language, created_at, updated_at, pushed_at, indexed_at,
+                 secrets_count, runners_count)
                 VALUES 
                 (@github_id, @full_name, @name, @owner, @description, @clone_url, @ssh_url,
-                 @is_private, @is_fork, @language, @created_at, @updated_at, @pushed_at, @indexed_at)
+                 @is_private, @is_fork, @language, @created_at, @updated_at, @pushed_at, @indexed_at,
+                 @secrets_count, @runners_count)
             """
             
             use command = new SqliteCommand(upsertCommand, connection)
@@ -1568,6 +1592,14 @@ module GitHubRepoIndex =
                 | Some dt -> box (dt.ToString("O"))
                 | None -> box DBNull.Value) |> ignore
             command.Parameters.AddWithValue("@indexed_at", repo.IndexedAt.ToString("O")) |> ignore
+            command.Parameters.AddWithValue("@secrets_count", 
+                match repo.SecretsCount with 
+                | Some count -> box count
+                | None -> box DBNull.Value) |> ignore
+            command.Parameters.AddWithValue("@runners_count", 
+                match repo.RunnersCount with 
+                | Some count -> box count
+                | None -> box DBNull.Value) |> ignore
             
             command.ExecuteNonQuery() |> ignore
         with
@@ -1584,7 +1616,8 @@ module GitHubRepoIndex =
             
             let selectCommand = """
                 SELECT github_id, full_name, name, owner, description, clone_url, ssh_url,
-                       is_private, is_fork, language, created_at, updated_at, pushed_at, indexed_at
+                       is_private, is_fork, language, created_at, updated_at, pushed_at, indexed_at,
+                       secrets_count, runners_count
                 FROM github_repos
                 ORDER BY full_name
             """
@@ -1609,6 +1642,20 @@ module GitHubRepoIndex =
                     else
                         Some (DateTime.Parse(pushedValue :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind))
                 
+                let secretsCount =
+                    let secretsValue = reader.["secrets_count"]
+                    if secretsValue = box DBNull.Value then
+                        None
+                    else
+                        Some (secretsValue :?> int64 |> int)
+                
+                let runnersCount =
+                    let runnersValue = reader.["runners_count"]
+                    if runnersValue = box DBNull.Value then
+                        None
+                    else
+                        Some (runnersValue :?> int64 |> int)
+                
                 let repo = {
                     Id = reader.["github_id"] :?> int64
                     FullName = reader.["full_name"] :?> string
@@ -1624,6 +1671,8 @@ module GitHubRepoIndex =
                     UpdatedAt = DateTime.Parse(reader.["updated_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
                     PushedAt = pushedAt
                     IndexedAt = DateTime.Parse(reader.["indexed_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                    SecretsCount = secretsCount
+                    RunnersCount = runnersCount
                 }
                 repos <- repo :: repos
             
@@ -1643,7 +1692,8 @@ module GitHubRepoIndex =
             
             let selectCommand = """
                 SELECT github_id, full_name, name, owner, description, clone_url, ssh_url,
-                       is_private, is_fork, language, created_at, updated_at, pushed_at, indexed_at
+                       is_private, is_fork, language, created_at, updated_at, pushed_at, indexed_at,
+                       secrets_count, runners_count
                 FROM github_repos
                 WHERE owner = @owner COLLATE NOCASE
                 ORDER BY name
@@ -1671,6 +1721,20 @@ module GitHubRepoIndex =
                     else
                         Some (DateTime.Parse(pushedValue :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind))
                 
+                let secretsCount =
+                    let secretsValue = reader.["secrets_count"]
+                    if secretsValue = box DBNull.Value then
+                        None
+                    else
+                        Some (secretsValue :?> int64 |> int)
+                
+                let runnersCount =
+                    let runnersValue = reader.["runners_count"]
+                    if runnersValue = box DBNull.Value then
+                        None
+                    else
+                        Some (runnersValue :?> int64 |> int)
+                
                 let repo = {
                     Id = reader.["github_id"] :?> int64
                     FullName = reader.["full_name"] :?> string
@@ -1686,6 +1750,8 @@ module GitHubRepoIndex =
                     UpdatedAt = DateTime.Parse(reader.["updated_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
                     PushedAt = pushedAt
                     IndexedAt = DateTime.Parse(reader.["indexed_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                    SecretsCount = secretsCount
+                    RunnersCount = runnersCount
                 }
                 repos <- repo :: repos
             
@@ -1711,3 +1777,84 @@ module GitHubRepoIndex =
         | ex ->
             printfn $"Error getting repository count: {ex.Message}"
             0
+    
+    /// Search repositories by name or description (case-insensitive)
+    let searchRepositories (searchTerm: string) : GitHubRepo list =
+        try
+            initializeGitHubTable()
+            
+            use connection = new SqliteConnection($"Data Source={dbPath}")
+            connection.Open()
+            
+            let selectCommand = """
+                SELECT github_id, full_name, name, owner, description, clone_url, ssh_url,
+                       is_private, is_fork, language, created_at, updated_at, pushed_at, indexed_at,
+                       secrets_count, runners_count
+                FROM github_repos
+                WHERE full_name LIKE @search COLLATE NOCASE
+                   OR name LIKE @search COLLATE NOCASE
+                   OR description LIKE @search COLLATE NOCASE
+                ORDER BY full_name
+            """
+            
+            use command = new SqliteCommand(selectCommand, connection)
+            command.Parameters.AddWithValue("@search", sprintf "%%%s%%" searchTerm) |> ignore
+            
+            use reader = command.ExecuteReader()
+            
+            let mutable repos = []
+            
+            while reader.Read() do
+                let language = 
+                    let langValue = reader.["language"]
+                    if langValue = box DBNull.Value || String.IsNullOrEmpty(langValue :?> string) then
+                        None
+                    else
+                        Some (langValue :?> string)
+                
+                let pushedAt =
+                    let pushedValue = reader.["pushed_at"]
+                    if pushedValue = box DBNull.Value then
+                        None
+                    else
+                        Some (DateTime.Parse(pushedValue :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind))
+                
+                let secretsCount =
+                    let secretsValue = reader.["secrets_count"]
+                    if secretsValue = box DBNull.Value then
+                        None
+                    else
+                        Some (secretsValue :?> int64 |> int)
+                
+                let runnersCount =
+                    let runnersValue = reader.["runners_count"]
+                    if runnersValue = box DBNull.Value then
+                        None
+                    else
+                        Some (runnersValue :?> int64 |> int)
+                
+                let repo = {
+                    Id = reader.["github_id"] :?> int64
+                    FullName = reader.["full_name"] :?> string
+                    Name = reader.["name"] :?> string
+                    Owner = reader.["owner"] :?> string
+                    Description = reader.["description"] :?> string
+                    CloneUrl = reader.["clone_url"] :?> string
+                    SshUrl = reader.["ssh_url"] :?> string
+                    IsPrivate = (reader.["is_private"] :?> int64) = 1L
+                    IsFork = (reader.["is_fork"] :?> int64) = 1L
+                    Language = language
+                    CreatedAt = DateTime.Parse(reader.["created_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                    UpdatedAt = DateTime.Parse(reader.["updated_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                    PushedAt = pushedAt
+                    IndexedAt = DateTime.Parse(reader.["indexed_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                    SecretsCount = secretsCount
+                    RunnersCount = runnersCount
+                }
+                repos <- repo :: repos
+            
+            List.rev repos
+        with
+        | ex ->
+            printfn $"Error searching repositories: {ex.Message}"
+            []

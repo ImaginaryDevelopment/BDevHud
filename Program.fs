@@ -170,6 +170,8 @@ module IntegrationHandlers =
                                 UpdatedAt = repo.UpdatedAt
                                 PushedAt = repo.PushedAt
                                 IndexedAt = DateTime.UtcNow
+                                SecretsCount = None  // Will be populated separately
+                                RunnersCount = None  // Will be populated separately
                             }
                             GitHubRepoIndex.upsertRepository dbRepo
                         
@@ -195,22 +197,37 @@ module IntegrationHandlers =
             printfn "GitHub Repositories from Database"
             printfn "%s" (String.replicate 50 "=")
 
+            // Get search term
+            let searchTerm = CommandLineArgs.getGitHubRepoSearch()
+            
             // Get organization filter
             let orgFilter = CommandLineArgs.getGitHubOrg()
 
             let repos =
-                match orgFilter with
-                | Some org ->
+                match (searchTerm, orgFilter) with
+                | (Some search, _) ->
+                    printfn "🔍 Searching for: %s\n" search
+                    let allResults = GitHubRepoIndex.searchRepositories search
+                    match orgFilter with
+                    | Some org ->
+                        printfn "   (filtered by organization: %s)\n" org
+                        allResults |> List.filter (fun r -> r.Owner.Equals(org, StringComparison.OrdinalIgnoreCase))
+                    | None -> allResults
+                | (None, Some org) ->
                     printfn "🏢 Filtering by organization: %s\n" org
                     GitHubRepoIndex.getRepositoriesByOwner org
-                | None ->
+                | (None, None) ->
                     printfn "📡 Loading all repositories from database...\n"
                     GitHubRepoIndex.getAllRepositories()
 
             if repos.IsEmpty then
-                printfn "⚠️ No repositories found in database"
-                printfn "\nTo index repositories, use:"
-                printfn "  --list-github-repos --github-token=<your-token>"
+                match searchTerm with
+                | Some search ->
+                    printfn "⚠️ No repositories found matching '%s'" search
+                | None ->
+                    printfn "⚠️ No repositories found in database"
+                    printfn "\nTo index repositories, use:"
+                    printfn "  --list-github-repos --github-token=<your-token>"
             else
                 printfn "📊 Found %d repositories:\n" repos.Length
 
@@ -226,6 +243,17 @@ module IntegrationHandlers =
                         printfn "     %s" repo.Description
                     printfn "     Clone: %s" repo.CloneUrl
                     printfn "     Indexed: %s" (repo.IndexedAt.ToString("yyyy-MM-dd HH:mm"))
+                    
+                    // Show secrets and runners if available
+                    match (repo.SecretsCount, repo.RunnersCount) with
+                    | (Some secrets, Some runners) when secrets > 0 || runners > 0 ->
+                        printfn "     🔐 Secrets: %d | 🏃 Runners: %d" secrets runners
+                    | (Some secrets, _) when secrets > 0 ->
+                        printfn "     🔐 Secrets: %d" secrets
+                    | (_, Some runners) when runners > 0 ->
+                        printfn "     🏃 Runners: %d" runners
+                    | _ -> ()
+                    
                     printfn "")
 
                 printfn "\n📈 Summary:"
@@ -236,6 +264,106 @@ module IntegrationHandlers =
                 
                 let distinctOrgs = repos |> List.map (fun r -> r.Owner) |> List.distinct |> List.length
                 printfn "  Organizations: %d" distinctOrgs
+                
+                // Show secrets/runners summary if any repos have been queried
+                let reposWithSecrets = repos |> List.filter (fun r -> r.SecretsCount.IsSome) |> List.length
+                let reposWithRunners = repos |> List.filter (fun r -> r.RunnersCount.IsSome) |> List.length
+                if reposWithSecrets > 0 || reposWithRunners > 0 then
+                    let totalSecrets = repos |> List.sumBy (fun r -> r.SecretsCount |> Option.defaultValue 0)
+                    let totalRunners = repos |> List.sumBy (fun r -> r.RunnersCount |> Option.defaultValue 0)
+                    printfn "\n🔍 Metadata:"
+                    printfn "  Total Secrets: %d" totalSecrets
+                    printfn "  Total Runners: %d" totalRunners
+                    printfn "  Queried: %d repos" (max reposWithSecrets reposWithRunners)
+
+    /// Handle querying GitHub metadata (secrets and runners) for stored repos
+    let handleQueryGitHubMetadata () =
+        if not (CommandLineArgs.shouldQueryGitHubMetadata()) then
+            ()
+        else
+            printfn "\n%s" (String.replicate 50 "=")
+            printfn "Query GitHub Metadata (Secrets & Runners)"
+            printfn "%s" (String.replicate 50 "=")
+
+            // Get token from command line or environment
+            let githubToken = 
+                match CommandLineArgs.getGitHubToken() with
+                | Some token -> Some token
+                | None -> 
+                    let envToken = Environment.GetEnvironmentVariable("GITHUB_TOKEN")
+                    if String.IsNullOrEmpty(envToken) then None else Some envToken
+
+            // Get organization filter
+            let orgFilter = CommandLineArgs.getGitHubOrg()
+
+            match githubToken with
+            | Some token ->
+                printfn "🔑 Using GitHub token for authentication\n"
+                
+                let config = { GitHubConfig.Token = Some token; UserAgent = "BDevHud" }
+                
+                // Get repos from database
+                let repos =
+                    match orgFilter with
+                    | Some org ->
+                        printfn "🏢 Querying repositories for organization: %s" org
+                        GitHubRepoIndex.getRepositoriesByOwner org
+                    | None ->
+                        printfn "📡 Querying all repositories from database..."
+                        GitHubRepoIndex.getAllRepositories()
+
+                if repos.IsEmpty then
+                    printfn "⚠️ No repositories found in database"
+                    printfn "\nTo index repositories first, use:"
+                    printfn "  --list-github-repos --github-token=<your-token>"
+                else
+                    printfn "Found %d repositories to query\n" repos.Length
+                    
+                    let stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                    let mutable processed = 0
+                    let mutable totalSecrets = 0
+                    let mutable totalRunners = 0
+                    
+                    for repo in repos do
+                        processed <- processed + 1
+                        
+                        // Query secrets count
+                        let secretsCount = 
+                            GitHubAdapter.getRepositorySecretsCount config repo.Owner repo.Name
+                            |> Async.AwaitTask
+                            |> Async.RunSynchronously
+                        
+                        // Query runners count
+                        let runnersCount = 
+                            GitHubAdapter.getRepositoryRunnersCount config repo.Owner repo.Name
+                            |> Async.AwaitTask
+                            |> Async.RunSynchronously
+                        
+                        totalSecrets <- totalSecrets + secretsCount
+                        totalRunners <- totalRunners + runnersCount
+                        
+                        // Update database
+                        let updatedRepo = { repo with SecretsCount = Some secretsCount; RunnersCount = Some runnersCount }
+                        GitHubRepoIndex.upsertRepository updatedRepo
+                        
+                        // Progress indicator every 10 repos
+                        if processed % 10 = 0 then
+                            printfn "⏳ Processed %d/%d repositories..." processed repos.Length
+                    
+                    stopwatch.Stop()
+                    
+                    printfn "\n✅ Completed querying metadata for %d repositories (took %.1f seconds)" repos.Length stopwatch.Elapsed.TotalSeconds
+                    printfn "\n📊 Summary:"
+                    printfn "  Total Secrets: %d" totalSecrets
+                    printfn "  Total Runners: %d" totalRunners
+                    printfn "  Repositories with Secrets: %d" (repos |> List.filter (fun _ -> totalSecrets > 0) |> List.length)
+                    printfn "  Repositories with Runners: %d" (repos |> List.filter (fun _ -> totalRunners > 0) |> List.length)
+
+            | None ->
+                printfn "❌ No GitHub token provided"
+                printfn "Please provide a token using:"
+                printfn "  --github-token=<your-token>"
+                printfn "  or set GITHUB_TOKEN environment variable"
 
     /// Handle GitHub integration if requested
     let handleGitHubIntegration () =
@@ -593,6 +721,7 @@ module Program =
         // Handle integrations based on command line flags
         IntegrationHandlers.handleListGitHubRepos ()
         IntegrationHandlers.handleDisplayGitHubRepos ()
+        IntegrationHandlers.handleQueryGitHubMetadata ()
         IntegrationHandlers.handleGitHubIntegration ()
         IntegrationHandlers.handleOctopusIntegration ()
         IntegrationHandlers.handleOctopusIndexing ()
