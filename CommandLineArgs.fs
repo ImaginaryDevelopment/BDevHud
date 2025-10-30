@@ -106,6 +106,16 @@ module CommandLineArgs =
         let args = getArgs ()
         args |> Array.contains "--query-github-metadata" || args |> Array.contains "--github-metadata"
 
+    /// Check if we should query individual GitHub secrets with names and scopes
+    let shouldQueryGitHubSecrets () =
+        let args = getArgs ()
+        args |> Array.contains "--query-github-secrets" || args |> Array.contains "--github-secrets"
+
+    /// Check if we should display GitHub secrets from database
+    let shouldDisplayGitHubSecrets () =
+        let args = getArgs ()
+        args |> Array.contains "--display-github-secrets" || args |> Array.contains "--show-github-secrets"
+
     /// Get GitHub repo search term from command line args
     let getGitHubRepoSearch () =
         let args = getArgs ()
@@ -178,8 +188,10 @@ module CommandLineArgs =
         let hasGitHubRepoListing = shouldListGitHubRepos()
         let hasGitHubRepoDisplay = shouldDisplayGitHubRepos()
         let hasGitHubMetadataQuery = shouldQueryGitHubMetadata()
+        let hasGitHubSecretsQuery = shouldQueryGitHubSecrets()
+        let hasGitHubSecretsDisplay = shouldDisplayGitHubSecrets()
         
-        if hasGitHubRepoListing || hasGitHubRepoDisplay || hasGitHubMetadataQuery then
+        if hasGitHubRepoListing || hasGitHubRepoDisplay || hasGitHubMetadataQuery || hasGitHubSecretsQuery || hasGitHubSecretsDisplay then
             true
         elif hasAnySearch then
             not (shouldPullRepos() || shouldIndexFiles())

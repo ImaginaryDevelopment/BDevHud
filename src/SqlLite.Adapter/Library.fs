@@ -55,6 +55,19 @@ type GitHubRepo = {
     RunnersCount: int option
 }
 
+// GitHub secret entry (repository or environment level)
+type GitHubSecret = {
+    Id: int64
+    RepoId: int64
+    RepoFullName: string
+    SecretName: string
+    Scope: string // "repository" or "environment"
+    EnvironmentName: string option
+    CreatedAt: DateTime option
+    UpdatedAt: DateTime option
+    IndexedAt: DateTime
+}
+
 // Octopus deployment step entry
 type OctopusStep = {
     Id: int
@@ -1548,12 +1561,40 @@ module GitHubRepoIndex =
         | _ -> ()
 
         
+        // Create github_secrets table
+        let createSecretsTableCommand = """
+            CREATE TABLE IF NOT EXISTS github_secrets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id INTEGER NOT NULL,
+                repo_full_name TEXT NOT NULL,
+                secret_name TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                environment_name TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                indexed_at TEXT NOT NULL,
+                UNIQUE(repo_id, secret_name, scope, environment_name)
+            )
+        """
+        use secretsTableCommand = new SqliteCommand(createSecretsTableCommand, connection)
+        secretsTableCommand.ExecuteNonQuery() |> ignore
+        
         // Create index for searching
         let createIndexCommand = """
             CREATE INDEX IF NOT EXISTS idx_github_repos_owner ON github_repos(owner)
         """
         use indexCommand = new SqliteCommand(createIndexCommand, connection)
         indexCommand.ExecuteNonQuery() |> ignore
+        
+        // Create indexes for secrets table
+        let createSecretsIndexes = [
+            "CREATE INDEX IF NOT EXISTS idx_github_secrets_repo_id ON github_secrets(repo_id)"
+            "CREATE INDEX IF NOT EXISTS idx_github_secrets_name ON github_secrets(secret_name)"
+            "CREATE INDEX IF NOT EXISTS idx_github_secrets_scope ON github_secrets(scope)"
+        ]
+        for indexSql in createSecretsIndexes do
+            use cmd = new SqliteCommand(indexSql, connection)
+            cmd.ExecuteNonQuery() |> ignore
     
     /// Insert or update a GitHub repository
     let upsertRepository (repo: GitHubRepo) : unit =
@@ -1857,4 +1898,94 @@ module GitHubRepoIndex =
         with
         | ex ->
             printfn $"Error searching repositories: {ex.Message}"
+            []
+    
+    /// Insert or update a GitHub secret
+    let upsertSecret (secret: GitHubSecret) : unit =
+        try
+            initializeGitHubTable()
+            
+            use connection = new SqliteConnection($"Data Source={dbPath}")
+            connection.Open()
+            
+            let upsertCommand = """
+                INSERT OR REPLACE INTO github_secrets 
+                (repo_id, repo_full_name, secret_name, scope, environment_name, 
+                 created_at, updated_at, indexed_at)
+                VALUES 
+                (@repo_id, @repo_full_name, @secret_name, @scope, @environment_name,
+                 @created_at, @updated_at, @indexed_at)
+            """
+            
+            use command = new SqliteCommand(upsertCommand, connection)
+            command.Parameters.AddWithValue("@repo_id", secret.RepoId) |> ignore
+            command.Parameters.AddWithValue("@repo_full_name", secret.RepoFullName) |> ignore
+            command.Parameters.AddWithValue("@secret_name", secret.SecretName) |> ignore
+            command.Parameters.AddWithValue("@scope", secret.Scope) |> ignore
+            command.Parameters.AddWithValue("@environment_name", if secret.EnvironmentName.IsSome then box secret.EnvironmentName.Value else box DBNull.Value) |> ignore
+            command.Parameters.AddWithValue("@created_at", if secret.CreatedAt.IsSome then box (secret.CreatedAt.Value.ToString("o")) else box DBNull.Value) |> ignore
+            command.Parameters.AddWithValue("@updated_at", if secret.UpdatedAt.IsSome then box (secret.UpdatedAt.Value.ToString("o")) else box DBNull.Value) |> ignore
+            command.Parameters.AddWithValue("@indexed_at", secret.IndexedAt.ToString("o")) |> ignore
+            
+            command.ExecuteNonQuery() |> ignore
+        with
+        | ex ->
+            printfn $"Error upserting GitHub secret: {ex.Message}"
+    
+    /// Get all secrets for a repository
+    let getSecretsForRepository (repoId: int64) : GitHubSecret list =
+        try
+            initializeGitHubTable()
+            
+            use connection = new SqliteConnection($"Data Source={dbPath}")
+            connection.Open()
+            
+            let selectCommand = """
+                SELECT id, repo_id, repo_full_name, secret_name, scope, environment_name,
+                       created_at, updated_at, indexed_at
+                FROM github_secrets
+                WHERE repo_id = @repo_id
+                ORDER BY scope, environment_name, secret_name
+            """
+            
+            use command = new SqliteCommand(selectCommand, connection)
+            command.Parameters.AddWithValue("@repo_id", repoId) |> ignore
+            
+            use reader = command.ExecuteReader()
+            
+            let mutable secrets = []
+            
+            while reader.Read() do
+                let environmentName =
+                    let envValue = reader.["environment_name"]
+                    if envValue = box DBNull.Value then None
+                    else Some (envValue :?> string)
+                
+                let createdAt =
+                    let createdValue = reader.["created_at"]
+                    if createdValue = box DBNull.Value then None
+                    else Some (DateTime.Parse(createdValue :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind))
+                
+                let updatedAt =
+                    let updatedValue = reader.["updated_at"]
+                    if updatedValue = box DBNull.Value then None
+                    else Some (DateTime.Parse(updatedValue :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind))
+                
+                let secret = {
+                    Id = reader.["id"] :?> int64
+                    RepoId = reader.["repo_id"] :?> int64
+                    RepoFullName = reader.["repo_full_name"] :?> string
+                    SecretName = reader.["secret_name"] :?> string
+                    Scope = reader.["scope"] :?> string
+                    EnvironmentName = environmentName
+                    CreatedAt = createdAt
+                    UpdatedAt = updatedAt
+                    IndexedAt = DateTime.Parse(reader.["indexed_at"] :?> string, null, System.Globalization.DateTimeStyles.RoundtripKind)
+                }
+                secrets <- secret :: secrets
+            
+            List.rev secrets
+        with
+        | ex ->
+            printfn $"Error getting secrets for repository: {ex.Message}"
             []

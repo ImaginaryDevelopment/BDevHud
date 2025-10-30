@@ -258,3 +258,110 @@ module GitHubAdapter =
             with ex ->
                 return 0
         }
+    
+    /// Get repository secrets with names (requires admin access)
+    /// Returns list of secret names with creation/update timestamps
+    let getRepositorySecrets (config: GitHubConfig) (owner: string) (repoName: string) : Task<GitHubRepositorySecret list> =
+        task {
+            try
+                use httpClient = new System.Net.Http.HttpClient()
+                httpClient.DefaultRequestHeaders.Add("User-Agent", config.UserAgent)
+                
+                match config.Token with
+                | Some token -> 
+                    httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {token}")
+                | None -> ()
+                
+                let url = $"https://api.github.com/repos/{owner}/{repoName}/actions/secrets"
+                let! response = httpClient.GetAsync(url)
+                
+                if response.IsSuccessStatusCode then
+                    let! content = response.Content.ReadAsStringAsync()
+                    let json = System.Text.Json.JsonDocument.Parse(content)
+                    let secretsArray = json.RootElement.GetProperty("secrets")
+                    
+                    let secrets = 
+                        secretsArray.EnumerateArray()
+                        |> Seq.map (fun secret ->
+                            { Name = secret.GetProperty("name").GetString()
+                              CreatedAt = DateTime.Parse(secret.GetProperty("created_at").GetString())
+                              UpdatedAt = DateTime.Parse(secret.GetProperty("updated_at").GetString()) })
+                        |> List.ofSeq
+                    
+                    return secrets
+                else
+                    return []
+            with ex ->
+                return []
+        }
+    
+    /// Get environments for a repository
+    let getRepositoryEnvironments (config: GitHubConfig) (owner: string) (repoName: string) : Task<string list> =
+        task {
+            try
+                use httpClient = new System.Net.Http.HttpClient()
+                httpClient.DefaultRequestHeaders.Add("User-Agent", config.UserAgent)
+                
+                match config.Token with
+                | Some token -> 
+                    httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {token}")
+                | None -> ()
+                
+                let url = $"https://api.github.com/repos/{owner}/{repoName}/environments"
+                let! response = httpClient.GetAsync(url)
+                
+                if response.IsSuccessStatusCode then
+                    let! content = response.Content.ReadAsStringAsync()
+                    let json = System.Text.Json.JsonDocument.Parse(content)
+                    
+                    let mutable envElement = Unchecked.defaultof<System.Text.Json.JsonElement>
+                    if json.RootElement.TryGetProperty("environments", &envElement) then
+                        let environments = 
+                            envElement.EnumerateArray()
+                            |> Seq.map (fun env -> env.GetProperty("name").GetString())
+                            |> List.ofSeq
+                        return environments
+                    else
+                        return []
+                else
+                    return []
+            with ex ->
+                return []
+        }
+    
+    /// Get environment secrets for a specific environment (requires admin access)
+    let getEnvironmentSecrets (config: GitHubConfig) (owner: string) (repoName: string) (environmentName: string) : Task<GitHubRepositorySecret list> =
+        task {
+            try
+                use httpClient = new System.Net.Http.HttpClient()
+                httpClient.DefaultRequestHeaders.Add("User-Agent", config.UserAgent)
+                
+                match config.Token with
+                | Some token -> 
+                    httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {token}")
+                | None -> ()
+                
+                // Note: Environment secrets are accessed via repository ID and environment name
+                let url = $"https://api.github.com/repositories/{owner}/environments/{environmentName}/secrets"
+                let! response = httpClient.GetAsync(url)
+                
+                if response.IsSuccessStatusCode then
+                    let! content = response.Content.ReadAsStringAsync()
+                    let json = System.Text.Json.JsonDocument.Parse(content)
+                    let secretsArray = json.RootElement.GetProperty("secrets")
+                    
+                    let secrets = 
+                        secretsArray.EnumerateArray()
+                        |> Seq.map (fun secret ->
+                            { Name = secret.GetProperty("name").GetString()
+                              CreatedAt = DateTime.Parse(secret.GetProperty("created_at").GetString())
+                              UpdatedAt = DateTime.Parse(secret.GetProperty("updated_at").GetString()) })
+                        |> List.ofSeq
+                    
+                    return secrets
+                else
+                    return []
+            with ex ->
+                return []
+        }
+

@@ -365,6 +365,197 @@ module IntegrationHandlers =
                 printfn "  --github-token=<your-token>"
                 printfn "  or set GITHUB_TOKEN environment variable"
 
+    /// Query and store individual GitHub secrets with names and scopes
+    let handleQueryGitHubSecrets () =
+        if not (CommandLineArgs.shouldQueryGitHubSecrets()) then
+            ()
+        else
+            printfn "\n%s" (String.replicate 50 "=")
+            printfn "Query Individual GitHub Secrets"
+            printfn "%s" (String.replicate 50 "=")
+
+            // Get token from command line or environment
+            let githubToken = 
+                match CommandLineArgs.getGitHubToken() with
+                | Some token -> Some token
+                | None -> 
+                    let envToken = Environment.GetEnvironmentVariable("GITHUB_TOKEN")
+                    if String.IsNullOrEmpty(envToken) then None else Some envToken
+
+            // Get organization filter
+            let orgFilter = CommandLineArgs.getGitHubOrg()
+
+            match githubToken with
+            | Some token ->
+                printfn "🔑 Using GitHub token for authentication\n"
+                
+                let config = { GitHubConfig.Token = Some token; UserAgent = "BDevHud" }
+                
+                // Get repos from database
+                let repos =
+                    match orgFilter with
+                    | Some org ->
+                        printfn "🏢 Querying secrets for organization: %s" org
+                        GitHubRepoIndex.getRepositoriesByOwner org
+                    | None ->
+                        printfn "📡 Querying secrets for all repositories from database..."
+                        GitHubRepoIndex.getAllRepositories()
+
+                if repos.IsEmpty then
+                    printfn "⚠️ No repositories found in database"
+                    printfn "\nTo index repositories first, use:"
+                    printfn "  --list-github-repos --github-token=<your-token>"
+                else
+                    printfn "Found %d repositories to query\n" repos.Length
+                    
+                    let stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                    let mutable processed = 0
+                    let mutable totalRepositorySecrets = 0
+                    let mutable totalEnvironmentSecrets = 0
+                    
+                    for repo in repos do
+                        processed <- processed + 1
+                        
+                        // Query repository-level secrets
+                        let repoSecrets = 
+                            GitHubAdapter.getRepositorySecrets config repo.Owner repo.Name
+                            |> Async.AwaitTask
+                            |> Async.RunSynchronously
+                        
+                        // Store each repository secret
+                        for secret in repoSecrets do
+                            let secretRecord = {
+                                Id = 0L // Auto-incremented
+                                RepoId = repo.Id
+                                RepoFullName = repo.FullName
+                                SecretName = secret.Name
+                                Scope = "repository"
+                                EnvironmentName = None
+                                CreatedAt = Some secret.CreatedAt
+                                UpdatedAt = Some secret.UpdatedAt
+                                IndexedAt = DateTime.UtcNow
+                            }
+                            GitHubRepoIndex.upsertSecret secretRecord
+                            totalRepositorySecrets <- totalRepositorySecrets + 1
+                        
+                        // Query environments
+                        let environments = 
+                            GitHubAdapter.getRepositoryEnvironments config repo.Owner repo.Name
+                            |> Async.AwaitTask
+                            |> Async.RunSynchronously
+                        
+                        // Query environment-level secrets for each environment
+                        for envName in environments do
+                            let envSecrets = 
+                                GitHubAdapter.getEnvironmentSecrets config repo.Owner repo.Name envName
+                                |> Async.AwaitTask
+                                |> Async.RunSynchronously
+                            
+                            for secret in envSecrets do
+                                let secretRecord = {
+                                    Id = 0L // Auto-incremented
+                                    RepoId = repo.Id
+                                    RepoFullName = repo.FullName
+                                    SecretName = secret.Name
+                                    Scope = "environment"
+                                    EnvironmentName = Some envName
+                                    CreatedAt = Some secret.CreatedAt
+                                    UpdatedAt = Some secret.UpdatedAt
+                                    IndexedAt = DateTime.UtcNow
+                                }
+                                GitHubRepoIndex.upsertSecret secretRecord
+                                totalEnvironmentSecrets <- totalEnvironmentSecrets + 1
+                        
+                        // Progress indicator every 10 repos
+                        if processed % 10 = 0 then
+                            printfn "⏳ Processed %d/%d repositories..." processed repos.Length
+                    
+                    stopwatch.Stop()
+                    
+                    printfn "\n✅ Completed querying secrets for %d repositories (took %.1f seconds)" repos.Length stopwatch.Elapsed.TotalSeconds
+                    printfn "\n📊 Summary:"
+                    printfn "  Repository-Level Secrets: %d" totalRepositorySecrets
+                    printfn "  Environment-Level Secrets: %d" totalEnvironmentSecrets
+                    printfn "  Total Individual Secrets: %d" (totalRepositorySecrets + totalEnvironmentSecrets)
+
+            | None ->
+                printfn "❌ No GitHub token provided"
+                printfn "Please provide a token using:"
+                printfn "  --github-token=<your-token>"
+                printfn "  or set GITHUB_TOKEN environment variable"
+
+    /// Display GitHub secrets from database
+    let handleDisplayGitHubSecrets () =
+        if not (CommandLineArgs.shouldDisplayGitHubSecrets()) then
+            ()
+        else
+            printfn "\n%s" (String.replicate 50 "=")
+            printfn "GitHub Secrets Display"
+            printfn "%s" (String.replicate 50 "=")
+
+            // Get organization filter
+            let orgFilter = CommandLineArgs.getGitHubOrg()
+            
+            // Get repos from database
+            let repos =
+                match orgFilter with
+                | Some org ->
+                    printfn "🏢 Showing secrets for organization: %s\n" org
+                    GitHubRepoIndex.getRepositoriesByOwner org
+                | None ->
+                    printfn "📡 Showing secrets for all repositories...\n"
+                    GitHubRepoIndex.getAllRepositories()
+
+            if repos.IsEmpty then
+                printfn "⚠️ No repositories found in database"
+            else
+                let mutable totalRepoSecrets = 0
+                let mutable totalEnvSecrets = 0
+                let mutable reposWithSecrets = 0
+                
+                for repo in repos do
+                    let secrets = GitHubRepoIndex.getSecretsForRepository repo.Id
+                    
+                    if not secrets.IsEmpty then
+                        reposWithSecrets <- reposWithSecrets + 1
+                        printfn "📦 %s" repo.FullName
+                        
+                        // Group by scope
+                        let repoSecrets = secrets |> List.filter (fun s -> s.Scope = "repository")
+                        let envSecrets = secrets |> List.filter (fun s -> s.Scope = "environment")
+                        
+                        if not repoSecrets.IsEmpty then
+                            printfn "  🔐 Repository Secrets (%d):" repoSecrets.Length
+                            for secret in repoSecrets do
+                                printfn "     • %s (Updated: %s)" 
+                                    secret.SecretName 
+                                    (if secret.UpdatedAt.IsSome then secret.UpdatedAt.Value.ToString("yyyy-MM-dd") else "N/A")
+                            totalRepoSecrets <- totalRepoSecrets + repoSecrets.Length
+                        
+                        if not envSecrets.IsEmpty then
+                            printfn "  🌍 Environment Secrets (%d):" envSecrets.Length
+                            // Group by environment
+                            let byEnv = envSecrets |> List.groupBy (fun s -> s.EnvironmentName)
+                            for (envName, envSecretsList) in byEnv do
+                                printfn "     Environment: %s" (envName |> Option.defaultValue "Unknown")
+                                for secret in envSecretsList do
+                                    printfn "       • %s (Updated: %s)" 
+                                        secret.SecretName 
+                                        (if secret.UpdatedAt.IsSome then secret.UpdatedAt.Value.ToString("yyyy-MM-dd") else "N/A")
+                            totalEnvSecrets <- totalEnvSecrets + envSecrets.Length
+                        
+                        printfn ""
+                
+                printfn "%s" (String.replicate 50 "=")
+                printfn "📊 Summary:"
+                printfn "  Total Repositories: %d" repos.Length
+                printfn "  Repositories with Secrets: %d" reposWithSecrets
+                printfn "  Total Repository-Level Secrets: %d" totalRepoSecrets
+                printfn "  Total Environment-Level Secrets: %d" totalEnvSecrets
+                printfn "  Total Secrets: %d" (totalRepoSecrets + totalEnvSecrets)
+
+
+
     /// Handle GitHub integration if requested
     let handleGitHubIntegration () =
         if not (CommandLineArgs.shouldRunGitHub()) then
@@ -722,6 +913,8 @@ module Program =
         IntegrationHandlers.handleListGitHubRepos ()
         IntegrationHandlers.handleDisplayGitHubRepos ()
         IntegrationHandlers.handleQueryGitHubMetadata ()
+        IntegrationHandlers.handleQueryGitHubSecrets ()
+        IntegrationHandlers.handleDisplayGitHubSecrets ()
         IntegrationHandlers.handleGitHubIntegration ()
         IntegrationHandlers.handleOctopusIntegration ()
         IntegrationHandlers.handleOctopusIndexing ()
